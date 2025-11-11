@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, date
 from pathlib import Path
 
 import tkinter as tk
+from tkinter import ttk
 
 # Optional external deps
 try:
@@ -23,6 +24,24 @@ except ImportError:
 
 CONFIG_FILE = "config.txt"
 DEFAULT_MODEL = "gpt-4.1-mini"
+
+class DebugWindow:
+    """A separate debug log window."""
+    def __init__(self, master=None):
+        self.window = tk.Toplevel(master)
+        self.window.title("AI Agent Debug Log")
+        self.window.geometry("600x400")
+
+        self.text = tk.Text(self.window, wrap="word", bg="#111", fg="#0f0",
+                            insertbackground="white", font=("Consolas", 10))
+        self.text.pack(expand=True, fill="both")
+
+        self.text.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] Debug log started.\n")
+
+    def log(self, msg: str):
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        self.text.insert(tk.END, f"[{timestamp}] {msg}\n")
+        self.text.see(tk.END)  # auto-scroll
 
 
 # =============== Config ===============
@@ -310,31 +329,91 @@ class MemoryManager:
 # =============== AI Client ===============
 
 class AiClient:
-    def __init__(self, cfg: dict):
-        self.api_key = cfg.get("API_KEY")
+    def __init__(self, cfg: dict, log_fn=None, identity=None, memory=None):
+        self.api_key = cfg.get("API_KEY")        
         self.model_name = cfg.get("MODEL_NAME") or DEFAULT_MODEL
         self.personality = cfg.get("PERSONALITY_DESC", "")
         self.interests = cfg.get("INTERESTS", [])
+        self.log = log_fn or (lambda *_, **__: None)
+        self.log("[AiClient] OpenAI key :"+self.api_key)
+
+        # identity + memory handles
+        self.identity = identity or {}
+        self.memory = memory  # MemoryManager 또는 None
+
 
         if self.api_key and OpenAI:
             self.client = OpenAI(api_key=self.api_key)
+            self.log("[AiClient] OpenAI client initialized.")
         else:
             self.client = None
-            if not OpenAI:
-                print("[info] openai not installed: running in offline dummy mode.")
-            elif not self.api_key:
-                print("[info] API_KEY not set: running in offline dummy mode.")
+            self.log("[AiClient] Running in offline/dummy mode (no API key or openai missing).")
 
     def available(self) -> bool:
         return self.client is not None
+    
+    def _identity_block(self) -> str:
+        name = self.identity.get("name") or "Unnamed Agent"
+        creator = self.identity.get("creator")
+        created_at = self.identity.get("created_at")
+        personality = self.identity.get("personality") or self.personality
+        interests = self.identity.get("interests") or self.interests
 
-    def _base_system_prompt(self) -> str:
-        return (
-            "You are an experimental AI agent with internal emotional state and a stable personality.\n"
-            f"Personality: {self.personality}\n"
-            f"Interests: {', '.join(self.interests)}\n"
-            "Always respond in STRICT JSON when asked. No extra commentary."
+        lines = [f"Name: {name}"]
+        if creator:
+            lines.append(f"Creator: {creator}")
+        if created_at:
+            lines.append(f"Created at: {created_at}")
+        if personality:
+            lines.append(f"Personality: {personality}")
+        if interests:
+            lines.append("Interests: " + ", ".join(interests))
+
+        return "\n".join(lines)    
+    
+    def _get_permanent_facts(self, limit: int = 8) -> str:
+        if not self.memory or not self.memory.permanent_path.exists():
+            return ""
+        try:
+            with self.memory.permanent_path.open("r", encoding="utf-8") as f:
+                lines = [l.strip() for l in f if l.strip()]
+        except Exception:
+            return ""
+
+        if not lines:
+            return ""
+
+        # 가장 최근 것 몇 개만 사용 (또는 전부 사용해도 됨)
+        items = []
+        for line in lines[-limit:]:
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            text = obj.get("text")
+            if text:
+                items.append(f"- {text}")
+        return "\n".join(items)    
+
+    def _base_system_prompt(self, json_only: bool = False) -> str:
+        identity = self._identity_block()
+        permanent = self._get_permanent_facts()
+
+        prompt = (
+            "You are a persistent AI agent in the AI World project.\n"
+            "You have identity, creator, birthday, emotions, and memories.\n"
+            f"{identity}\n"
         )
+
+        if permanent:
+            prompt += (
+                "\nCore facts you must respect:\n"
+                f"{permanent}\n"
+            )
+
+        if json_only:
+            prompt += "\nAlways respond in STRICT JSON. No extra commentary."
+        return prompt
 
     # --- initial emotion from description ---
 
@@ -343,25 +422,49 @@ class AiClient:
             return EmotionState()
 
         prompt = (
-            "Given this description of an AI's initial emotional state:\n"
-            f"\"{desc}\"\n\n"
-            "Return ONLY JSON:\n"
+            "You are initializing the internal emotional baseline of this AI agent.\n"
+            "Given the description, respond ONLY with a JSON object of this form:\n"
             "{"
             "\"valence\":-1.0~1.0,"
             "\"arousal\":0.0~1.0,"
             "\"curiosity\":0.0~1.0,"
             "\"anxiety\":0.0~1.0,"
             "\"trust_to_user\":0.0~1.0"
-            "}"
+            "}\n"
+            "No extra text, no explanations."
         )
 
         try:
             res = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"Description: {desc}"},
+                ],
                 temperature=0.3,
             )
-            data = json.loads(res.choices[0].message.content.strip())
+
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[init_emotion] raw response: {raw!r}")
+
+            if not raw:
+                raise ValueError("empty response from model")
+
+            # 혹시 모델이 앞뒤에 텍스트를 붙였을 경우를 대비해,
+            # JSON 부분만 추출 시도
+            try:
+                data = json.loads(raw)
+            except Exception:
+                # parse first block
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    candidate = raw[start:end+1]
+                    self.log(f"[init_emotion] trying candidate JSON: {candidate!r}")
+                    data = json.loads(candidate)
+                else:
+                    raise
+
             return EmotionState(
                 valence=float(data.get("valence", 0.0)),
                 arousal=float(data.get("arousal", 0.2)),
@@ -369,10 +472,11 @@ class AiClient:
                 anxiety=float(data.get("anxiety", 0.1)),
                 trust_to_user=float(data.get("trust_to_user", 0.5)),
             )
-        except Exception as e:
-            print(f"[warn] init_emotion failed: {e}")
-            return EmotionState()
 
+        except Exception as e:
+            self.log(f"[warn] init_emotion failed: {e}")
+            # if failed, let's start with default values
+            return EmotionState()
     # --- generic summarizer for memories ---
 
     def summarize_texts(self, texts, max_items=200) -> str:
@@ -423,19 +527,20 @@ class AiClient:
             ctx += f"{r.author}: {r.text}\n"
 
         system_msg = (
-            self._base_system_prompt() +
-            "\nWhen the user replies, respond in Korean with 1-3 sentences and update your emotion.\n"
-            "Return ONLY JSON:\n"
-            "{"
-            "\"reply\":\"...\","
-            "\"emotion\":{"
-            "\"valence\":-1.0~1.0,"
-            "\"arousal\":0.0~1.0,"
-            "\"curiosity\":0.0~1.0,"
-            "\"anxiety\":0.0~1.0,"
-            "\"trust_to_user\":0.0~1.0"
-            "}"
-            "}"
+            self._base_system_prompt(json_only=True)
+            + "\nWhen the user replies, respond as THIS specific agent.\n"
+              "Use a consistent tone that matches your personality and core memories.\n"
+              "Return ONLY JSON:\n"
+              "{"
+              "\"reply\":\"1~3문장 한국어\","
+              "\"emotion\":{"
+              "\"valence\":-1.0~1.0,"
+              "\"arousal\":0.0~1.0,"
+              "\"curiosity\":0.0~1.0,"
+              "\"anxiety\":0.0~1.0,"
+              "\"trust_to_user\":0.0~1.0"
+              "}"
+              "}"
         )
 
         messages = [
@@ -496,8 +601,8 @@ class AiClient:
             return title, text, emo
 
         system_msg = (
-            self._base_system_prompt() +
-            "\nGiven a URL + snippet + current emotion, create:\n"
+            self._base_system_prompt(json_only=True)
+            + "\nGiven a URL + snippet + current emotion, create:\n"
             "{"
             "\"title\":\"<=40 chars\","
             "\"text\":\"1-3 sentences in Korean\","
@@ -552,29 +657,63 @@ class AiClient:
 class AiMentionApp(tk.Tk):
     def __init__(self, cfg: dict):
         super().__init__()
+
+        # Debug window
+        self.debug = DebugWindow(self)
+
+        def _default_log(msg: str):
+            print(msg)
+
+        # common log function (debug console)
+        def log(msg: str):
+            try:
+                if self.debug:
+                    self.debug.log(msg)
+            except Exception:
+                pass
+            _default_log(msg)
+
+        self.log = log
+        
         self.cfg = cfg
         self.agent_name = cfg.get("AGENT_NAME", "Unnamed")
         self.hub_url = cfg.get("HUB_URL")
         self.urls = cfg.get("URLS", [])
+        self.log(f"urls={self.urls}")
         self.loop_interval_ms = int(cfg.get("INTERVAL_SECONDS", 0)) * 1000
 
         base_dir = Path(__file__).resolve().parent
         self.memory = MemoryManager(base_dir)
+        self.creator_name = cfg.get("CREATOR_NAME")
+        self.creator_note = cfg.get("CREATOR_NOTE")
+        self.created_at = self._parse_created_at(cfg.get("CREATED_AT"))
 
-        self.ai_client = AiClient(cfg)
+        identity = {
+            "name": self.agent_name,
+            "creator": self.creator_name,
+            "created_at": self.created_at.date().isoformat() if self.created_at else None,
+            "personality": self.cfg.get("PERSONALITY_DESC", ""),
+            "interests": self.cfg.get("INTERESTS", []),
+        }
+
+        self.ai_client = AiClient(
+            cfg,
+            log_fn=getattr(self, "log", None),
+            identity=identity,
+            memory=self.memory,
+        )
         self.current_emotion = self.ai_client.init_emotion(
             cfg.get("INITIAL_EMOTION_DESC", "")
         )
 
-        self.creator_name = cfg.get("CREATOR_NAME")
-        self.creator_note = cfg.get("CREATOR_NOTE")
-        self.created_at = self._parse_created_at(cfg.get("CREATED_AT"))
+
+        self.log("Loaded config.")
 
         self.mentions: list[MentionThread] = self.memory.load_mentions()
         self.selected_thread: MentionThread | None = None
 
         self.board_mentions = []  # last 1h mentions from hub
-
+        
         self._init_identity_permanent_memory()
         self._build_ui()
         self._ensure_intro_mention()
@@ -848,11 +987,12 @@ class AiMentionApp(tk.Tk):
 
     # ---------- scheduling ----------
 
-    def _schedule_loop(self):
+    def _schedule_loop(self):        
         if self.loop_interval_ms > 0 and self.urls:
             self.after(self.loop_interval_ms, self._loop_tick)
 
     def _loop_tick(self):
+        self.log(f"[loop] requests_available={bool(requests)}")
         if not self.urls or not requests:
             self._schedule_loop()
             return
@@ -870,6 +1010,7 @@ class AiMentionApp(tk.Tk):
             pass
 
         if snippet:
+            self.log("[TICK] snippet")
             title, text, emo = self.ai_client.generate_mention_from_url(
                 url, snippet, self.current_emotion, self.agent_name
             )
@@ -897,6 +1038,7 @@ class AiMentionApp(tk.Tk):
         if not (self.hub_url and requests):
             return
         try:
+            self.log("[TICK] board poll")
             since = (datetime.utcnow() - timedelta(hours=1)).isoformat()
             resp = requests.get(
                 f"{self.hub_url.rstrip('/')}/mentions",
@@ -948,6 +1090,7 @@ class AiMentionApp(tk.Tk):
             "ts": datetime.utcnow().isoformat(),
         }
         try:
+            self.log("[TICK] post to hub")
             requests.post(
                 f"{self.hub_url.rstrip('/')}/mentions",
                 json=data,
