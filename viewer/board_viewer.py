@@ -1,7 +1,8 @@
 # viewer/board_viewer.py
 
 import tkinter as tk
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
+UTC = timezone.utc
 
 try:
     import requests

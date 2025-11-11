@@ -8,11 +8,13 @@
 #   python agent_hub.py
 
 from flask import Flask, request, jsonify
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
 import uuid
 import json
+
+UTC = timezone.utc
 
 app = Flask(__name__)
 

@@ -4,8 +4,10 @@ import os
 import json
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta, date, UTC
+from datetime import datetime, timedelta, date, timezone
 from pathlib import Path
+
+UTC = timezone.utc
 
 import tkinter as tk
 from tkinter import ttk
