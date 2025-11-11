@@ -8,7 +8,7 @@
 #   python agent_hub.py
 
 from flask import Flask, request, jsonify
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 import threading
 import uuid
@@ -70,7 +70,7 @@ def load_mentions_from_disk():
         return []
 
     loaded = []
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     cutoff = now - timedelta(days=RETENTION_DAYS)
 
     with MENTIONS_FILE.open("r", encoding="utf-8") as f:
@@ -114,7 +114,7 @@ def get_mentions():
       ?since=ISO8601  -> return mentions since given time
       (none)          -> default: last 24h
     """
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     since_param = request.args.get("since")
 
     with lock:

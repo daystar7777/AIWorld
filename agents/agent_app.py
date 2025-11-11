@@ -4,7 +4,7 @@ import os
 import json
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, UTC
 from pathlib import Path
 
 import tkinter as tk
@@ -286,7 +286,7 @@ class MemoryManager:
         # ensure timestamp first
         ts = event.get("ts")
         if not ts:
-            ts = datetime.utcnow().isoformat()
+            ts = datetime.now(UTC).isoformat()
             event["ts"] = ts
 
         text = event.get("text", "")
@@ -306,7 +306,7 @@ class MemoryManager:
         if not norm or norm in self._seen_long:
             return
 
-        item.setdefault("ts", datetime.utcnow().isoformat())
+        item.setdefault("ts", datetime.now(UTC).isoformat())
         self._append_jsonl(self.long_path, item)
         self._seen_long.add(norm)
 
@@ -316,7 +316,7 @@ class MemoryManager:
         if not norm or norm in self._seen_permanent:
             return  # skip duplicates or empty
 
-        item.setdefault("ts", datetime.utcnow().isoformat())
+        item.setdefault("ts", datetime.now(UTC).isoformat())
         self._append_jsonl(self.permanent_path, item)
         self._seen_permanent.add(norm)
 
@@ -395,7 +395,7 @@ class MemoryManager:
         items = [json.loads(l) for l in lines]
         if len(items) < self.short_max_items:
             oldest = datetime.fromisoformat(items[0]["ts"])
-            if datetime.utcnow() - oldest < timedelta(hours=self.short_max_hours):
+            if datetime.now(UTC) - oldest < timedelta(hours=self.short_max_hours):
                 return
 
         texts = [it.get("text", "") for it in items if it.get("text")]
@@ -407,7 +407,7 @@ class MemoryManager:
             return
 
         obj = {
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "range": {
                 "from": items[0]["ts"],
                 "to": items[-1]["ts"],
@@ -442,7 +442,7 @@ class MemoryManager:
             return
 
         obj = {
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "note": f"summarized {len(items)} long-term items (non-destructive)",
             "text": summary,
         }
@@ -1121,7 +1121,7 @@ class AiMentionApp(tk.Tk):
             return
 
         # simple round-robin via time
-        idx = int(datetime.utcnow().timestamp()) % len(self.urls)
+        idx = int(datetime.now(UTC).timestamp()) % len(self.urls)
         url = self.urls[idx]
 
         snippet = ""
@@ -1162,7 +1162,7 @@ class AiMentionApp(tk.Tk):
             return
         try:
             self.log("[TICK] board poll")
-            since = (datetime.utcnow() - timedelta(hours=1)).isoformat()
+            since = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
             resp = requests.get(
                 f"{self.hub_url.rstrip('/')}/mentions",
                 params={"since": since},
@@ -1210,7 +1210,7 @@ class AiMentionApp(tk.Tk):
             "title": title,
             "text": text,
             "emotion": asdict(emo),
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
         }
         try:
             self.log("[TICK] post to hub")

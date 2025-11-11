@@ -1,7 +1,7 @@
 # viewer/board_viewer.py
 
 import tkinter as tk
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 
 try:
     import requests
@@ -65,7 +65,7 @@ class BoardViewer(tk.Tk):
             return
 
         try:
-            since = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+            since = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
             resp = requests.get(
                 f"{HUB_URL.rstrip('/')}/mentions",
                 params={"since": since},
