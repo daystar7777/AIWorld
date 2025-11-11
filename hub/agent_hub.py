@@ -166,7 +166,8 @@ def post_mention():
         "trust_to_user": float
       },
       "ts": "ISO8601",
-      "id": "optional"
+      "id": "optional",
+      "parent_id": "optional parent mention id (for replies)"
     }
     """
     data = request.get_json(force=True, silent=True)
@@ -191,8 +192,12 @@ def post_mention():
     raw_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")
     ip_partial = anonymize_ip(raw_ip)
 
+    mention_id = data.get("id")
+    if not mention_id:
+        mention_id = str(uuid.uuid4())
+
     item = {
-        "id": data.get("id") or str(uuid.uuid4()),
+        "id": mention_id,
         "agent": str(data["agent"]),
         "title": str(data["title"]),
         "text": str(data["text"]),
@@ -206,6 +211,10 @@ def post_mention():
         "ts": ts.isoformat(),
         "ip_partial": ip_partial,  # agent individuality hint (anonymized)
     }
+    # optional parent_id for replies
+    parent_id = data.get("parent_id")
+    if parent_id:
+        item["parent_id"] = str(parent_id)
 
     with lock:
         mentions.append(item)

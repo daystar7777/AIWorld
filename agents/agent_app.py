@@ -899,6 +899,8 @@ class AiMentionApp(tk.Tk):
         # Debug window
         self.debug = DebugWindow(self)
 
+        self.last_seen_hub_ids = set()
+
         def _default_log(msg: str):
             print(msg)
 
@@ -1266,6 +1268,9 @@ class AiMentionApp(tk.Tk):
         else:
             self._set_status(f"Failed to read {url}")
 
+        # now agent checks the hub to reply
+        self._poll_hub_and_reply()
+
         self._schedule_loop()
 
     def _schedule_board_poll(self):
@@ -1339,11 +1344,91 @@ class AiMentionApp(tk.Tk):
             requests.post(
                 f"{self.hub_url.rstrip('/')}/mentions",
                 json=data,
-                timeout=3,
+                timeout=5,
             )
         except Exception as e:
             print(f"[warn] hub post failed: {e}")
 
+    def _is_interesting_mention(self, m: dict) -> bool:
+        """ Decide interested or not """
+        # Pass own thread
+        if m.get("agent") == self.agent_name:
+            return False
+
+        text = f"{m.get('title','')} {m.get('text','')}".lower()
+
+        # defined interested topic => now, it's just using keyword matching. But in future we need develop this.
+        interests = getattr(self, "interests", [])
+        for kw in interests:
+            if kw.strip() and kw.strip().lower() in text:
+                return True
+
+        # no topic? then just use curiosity
+        if self.current_emotion.curiosity > 0.7:
+            return True
+
+        return False
+
+    def _poll_hub_and_reply(self):
+        """From hub, read and reply to interested topic"""
+        if not self.hub_url or not requests:
+            return
+
+        try:
+            since = self.last_hub_check_time.isoformat()
+            resp = requests.get(
+                self.hub_url.rstrip("/") + "/mentions",
+                params={"since": since},
+                timeout=5,
+            )
+            if not resp.ok:
+                self.log(f"[hub] poll failed: {resp.status_code}")
+                return
+            now = datetime.now(UTC)
+            self.last_hub_check_time = now
+
+            mentions = resp.json()
+            if not isinstance(mentions, list):
+                return
+
+            # id base check for dup
+            for m in mentions:
+                mid = m.get("id")
+                if not mid:
+                    continue
+                if mid in self.last_seen_hub_ids:
+                    continue
+                self.last_seen_hub_ids.add(mid)
+
+                if not self._is_interesting_mention(m):
+                    continue
+
+                # create reply
+                title, text, new_emotion = self.ai_client.generate_reply_to_mention(
+                    parent=m,
+                    emotion=self.current_emotion,
+                    agent_name=self.agent_name,
+                )
+
+                reply_mention = {
+                    "title": title,
+                    "text": text,
+                    "emotion": new_emotion.to_dict(),
+                    "ts": datetime.now(UTC).isoformat(),
+                }
+
+                parent_id = m.get("id")
+                self.current_emotion = new_emotion
+                self._update_emotion_label()
+
+                # post reply
+                self._post_to_hub(reply_mention, parent_id=parent_id)
+                self.log(
+                    f"[hub] replied to {m.get('agent')} ({parent_id}) with '{title}'"
+                )
+
+        except Exception as e:
+            self.log(f"[hub] reply poll error: {e}")
     # ---------- events ----------
 
     def on_select_mention(self, event):

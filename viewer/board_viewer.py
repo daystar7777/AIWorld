@@ -11,6 +11,18 @@ except ImportError:
 
 HUB_URL = "http://sggcoin.com:7878"  # adjust if needed
 
+def parse_ts_safe(ts: str) -> datetime:
+    """Timezone-aware datetime parser (UTC default)."""
+    if not ts:
+        return datetime.min.replace(tzinfo=UTC)
+    try:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
+    except Exception:
+        return datetime.min.replace(tzinfo=UTC)
+
 
 class BoardViewer(tk.Tk):
     def __init__(self):
@@ -76,10 +88,10 @@ class BoardViewer(tk.Tk):
         )
         self.lbl_status.pack(fill=tk.X)
 
-        # 초기 한번 호출
+        # first call
         self.after(100, self._poll)
 
-        # 이후 자동 주기 갱신 (60초)
+        # auto refresh in 60s
         self.auto_interval_ms = 60000
         self.after(self.auto_interval_ms, self._poll_loop)
 
@@ -109,7 +121,7 @@ class BoardViewer(tk.Tk):
             )
             if resp.ok:
                 mentions = resp.json()
-                self._render(mentions)
+                self._render_threaded(mentions)
                 self.lbl_status.config(
                     text=f"Updated at {datetime.now().strftime('%H:%M:%S')}  (count={len(mentions)})"
                 )
@@ -120,24 +132,72 @@ class BoardViewer(tk.Tk):
 
     # ----- Render -----
 
-    def _render(self, mentions):
+    def _render_threaded(self, mentions):
+        """parent_id based thread"""
         self.listbox.delete(0, tk.END)
+        if not mentions:
+            return
+
+        # id -> mention
+        by_id = {}
+        # parent_id -> [children...]
+        children = {}
+
         for m in mentions:
-            ts_raw = m.get("ts")
-            try:
-                ts = datetime.fromisoformat(ts_raw) if ts_raw else None
-            except Exception:
-                ts = None
+            mid = m.get("id")
+            if not mid:
+                continue
+            by_id[mid] = m
+            children.setdefault(mid, [])
 
-            agent = m.get("agent", "?")
-            title = (m.get("title", "") or "")[:60]
-            emo = m.get("emotion", {}) or {}
-            v = emo.get("valence", 0.0)
-            t = emo.get("trust_to_user", 0.0)
+        for m in mentions:
+            pid = m.get("parent_id")
+            mid = m.get("id")
+            if pid and pid in by_id and pid != mid:
+                children.setdefault(pid, []).append(m)
 
-            ts_str = ts.strftime("%Y-%m-%d %H:%M") if ts else "????-??-?? ??:??"
-            line = f"{ts_str} [{agent}] V={v:.1f} T={t:.1f} {title}"
-            self.listbox.insert(tk.END, line)
+        # root mention with no parents
+        roots = [
+            m for m in mentions
+            if not m.get("parent_id") or m.get("parent_id") not in by_id
+        ]
+
+        # sort in time order
+        roots.sort(key=lambda m: parse_ts_safe(m.get("ts")))
+
+        # draw tree with recursion
+        def render_node(m, level=0):
+            self._insert_mention_line(m, level)
+            # child in time order
+            for child in sorted(children.get(m.get("id"), []),
+                                key=lambda x: parse_ts_safe(x.get("ts"))):
+                render_node(child, level + 1)
+
+        for root in roots:
+            render_node(root, level=0)
+
+    def _insert_mention_line(self, m, level: int):
+        """ level with indentation + brief info """
+        ts = parse_ts_safe(m.get("ts"))
+        ts_str = ts.strftime("%m-%d %H:%M")
+
+        agent = m.get("agent", "?")
+        title = (m.get("title") or "").replace("\n", " ").strip()
+        title = title[:120] + ("..." if len(title) > 120 else "")
+
+        emo = m.get("emotion") or {}
+        v = emo.get("valence", 0.0)
+        t = emo.get("trust_to_user", 0.0)
+
+        is_reply = "parent_id" in m
+        if level == 0:
+            prefix = ""
+        else:
+            prefix = "  " * level + "↳ "
+
+        # 루트/리플 시각적으로 구분
+        line = f"{prefix}{ts_str} [{agent}] (V={v:.1f},T={t:.1f}) {title}"
+        self.listbox.insert(tk.END, line)
 
 
 if __name__ == "__main__":
