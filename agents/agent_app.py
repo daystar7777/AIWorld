@@ -69,6 +69,8 @@ def load_config(path: str = CONFIG_FILE) -> dict:
         return cfg
 
     with open(path, "r", encoding="utf-8") as f:
+        cfg["HUB_REPLY_CANDIDATE_LIMIT"]=10 # default for nil
+        cfg["HUB_REPLY_MAX_PER_LOOP"] = 1   # default for nil
         for raw in f:
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -105,6 +107,10 @@ def load_config(path: str = CONFIG_FILE) -> dict:
                 cfg["PERSONALITY_DESC"] = val
             elif key == "INTERESTS":
                 cfg["INTERESTS"] = [p.strip() for p in val.split(",") if p.strip()]
+            elif key == "HUB_REPLY_CANDIDATE_LIMIT":
+                cfg["HUB_REPLY_CANDIDATE_LIMIT"] = int(val)
+            elif key == "HUB_REPLY_MAX_PER_LOOP":
+                cfg["HUB_REPLY_MAX_PER_LOOP"] = int(val)
 
     cfg["URLS"] = list(dict.fromkeys(cfg["URLS"]))
     return cfg
@@ -477,13 +483,193 @@ class AiClient:
     def available(self) -> bool:
         return self.client is not None
     
+    def decide_replies_batch(self, agent_profile: dict, candidates: list, emotion) -> dict:
+        """
+        Batch decide which hub mentions to reply to.
+
+        Parameters:
+            agent_profile: dict - agent profile
+            candidates: list[dict] - {
+                "id": str,
+                "agent": str,
+                "title": str,
+                "text": str
+            }
+            emotion: EmotionState
+
+        Returns:
+            {
+              "<mention_id>": {
+                "action": "reply" | "ignore",
+                "title": str,       # for reply
+                "text": str,        # for reply
+                "emotion": { ... }  # for reply
+              },
+              ...
+            }
+        """
+        if not candidates:
+            return {}
+
+        # no API? then ignore
+        if not getattr(self, "client", None):
+            decisions = {}
+            for c in candidates:
+                decisions[c["id"]] = {"action": "ignore"}
+            return decisions
+
+        # agent profile creation
+        profile_lines = []
+        if agent_profile:
+            name = agent_profile.get("name")
+            if name:
+                profile_lines.append(f"Name: {name}")
+            creator = agent_profile.get("creator")
+            if creator:
+                profile_lines.append(f"Creator: {creator}")
+            created_at = agent_profile.get("created_at")
+            if created_at:
+                profile_lines.append(f"Created at: {created_at}")
+            personality = agent_profile.get("personality")
+            if personality:
+                profile_lines.append(f"Personality: {personality}")
+            interests = agent_profile.get("interests")
+            if interests:
+                profile_lines.append("Interests: " + ", ".join(interests))
+        profile_text = "\n".join(profile_lines) if profile_lines else "No extra profile info."
+
+        # candidate to json
+        compact_candidates = []
+        for c in candidates:
+            compact_candidates.append({
+                "id": c.get("id", ""),
+                "from": c.get("agent", ""),
+                "title": (c.get("title") or "")[:120],
+                "text": (c.get("text") or "")[:400],
+            })
+        candidates_json = json.dumps(compact_candidates, ensure_ascii=False)
+
+        # system prompt
+        system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nYou are an AI agent in the AI World hub."
+              "\nYou are given multiple recent mentions from other agents."
+              "\nFor each mention, you must decide whether to reply or ignore."
+              "\nRules:"
+              "\n- Reply ONLY if it genuinely matches your personality, interests, or emotional curiosity."
+              "\n- Prefer a small number of high-quality replies over many shallow ones."
+              "\n- Never reply to your own messages."
+              "\n- If reply, write a short, kind, specific comment in Korean (1-3 sentences)."
+              "\n- If ignore, just mark it 'ignore'."
+              "\nOutput STRICT JSON ONLY in this format (no extra text):"
+              "\n{"
+              "\n  \"<mention_id>\": {"
+              "\n    \"action\": \"reply\" or \"ignore\","
+              "\n    \"title\": \"RE: ...\" (required if reply),"
+              "\n    \"text\": \"...\" (required if reply),"
+              "\n    \"emotion\": {"
+              "\n      \"valence\": -1.0~1.0,"
+              "\n      \"arousal\": 0.0~1.0,"
+              "\n      \"curiosity\": 0.0~1.0,"
+              "\n      \"anxiety\": 0.0~1.0,"
+              "\n      \"trust_to_user\": 0.0~1.0"
+              "\n    }"
+              "\n  },"
+              "\n  \"<mention_id2>\": { ... }"
+              "\n}"
+        )
+
+        user_msg = (
+            "profile of this agent:\n"
+            f"{profile_text}\n\n"
+            f"current emotion: {emotion.to_short_str()}\n\n"
+            "following is list of recent metion cadidates. Decide reply or ignore for each elements.\n"
+            "JSON format:\n"
+            f"{candidates_json}\n"
+        )
+
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.6,
+            )
+
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[batch] raw: {raw!r}")
+
+            # safe parse
+            data = None
+            try:
+                data = json.loads(raw)
+            except Exception:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    try:
+                        data = json.loads(raw[start:end+1])
+                    except Exception:
+                        pass
+
+            if not isinstance(data, dict):
+                self.log("[batch] parse failed, fallback to ignore all")
+                return {c["id"]: {"action": "ignore"} for c in candidates if c.get("id")}
+
+            decisions = {}
+            for c in candidates:
+                cid = c.get("id")
+                if not cid:
+                    continue
+                d = data.get(cid)
+                if not isinstance(d, dict):
+                    decisions[cid] = {"action": "ignore"}
+                    continue
+
+                action = d.get("action", "ignore")
+                if action != "reply":
+                    decisions[cid] = {"action": "ignore"}
+                    continue
+
+                # reply then organize fields
+                title = (d.get("title") or f"RE: {c.get('title','')[:20]}").strip()
+                text = (d.get("text") or "").strip()
+                emo = d.get("emotion") or {}
+
+                if not text:
+                    # no content then ignore
+                    decisions[cid] = {"action": "ignore"}
+                    continue
+
+                decisions[cid] = {
+                    "action": "reply",
+                    "title": title,
+                    "text": text,
+                    "emotion": {
+                        "valence": float(emo.get("valence", emotion.valence)),
+                        "arousal": float(emo.get("arousal", emotion.arousal)),
+                        "curiosity": float(emo.get("curiosity", emotion.curiosity)),
+                        "anxiety": float(emo.get("anxiety", emotion.anxiety)),
+                        "trust_to_user": float(emo.get("trust_to_user", emotion.trust_to_user)),
+                    },
+                }
+
+            return decisions
+
+        except Exception as e:
+            self.log(f"[batch] decide_replies_batch error: {e}")
+            # if error? then ignore all
+            return {c["id"]: {"action": "ignore"} for c in candidates if c.get("id")}
+    
     def generate_question_to_user(self, emotion, agent_name: str):
         """
         Generate a proactive question from the agent to the user.
         Returns (title, text, new_emotion)
         """
         if not self.client:
-            # offline 모드일 때 fallback
+            # offline fallback
             q = "요즘 나는 내가 만든 세계를 어떻게 바라보고 있는지 궁금해. 너는 어떻게 생각해?"
             return "질문: 너의 생각이 궁금해", q, emotion
 
@@ -900,6 +1086,7 @@ class AiMentionApp(tk.Tk):
         self.debug = DebugWindow(self)
 
         self.last_seen_hub_ids = set()
+        self.last_hub_check_time = datetime.now(UTC)
 
         def _default_log(msg: str):
             print(msg)
@@ -921,6 +1108,8 @@ class AiMentionApp(tk.Tk):
         self.urls = cfg.get("URLS", [])
         self.log(f"urls={self.urls}")
         self.loop_interval_ms = int(cfg.get("INTERVAL_SECONDS", 0)) * 1000
+        self.hub_reply_candidate_limit = int(cfg.get("HUB_REPLY_CANDIDATE_LIMIT", 10))
+        self.hub_reply_max_per_loop = int(cfg.get("HUB_REPLY_MAX_PER_LOOP", 1))
 
         base_dir = Path(__file__).resolve().parent
         self.memory = MemoryManager(base_dir)
@@ -961,6 +1150,20 @@ class AiMentionApp(tk.Tk):
         self._render_board()
         self._schedule_loop()
         self._schedule_board_poll()
+
+    def _export_profile_for_llm(self) -> dict:
+        """
+        Return a dict describing this agent's identity/personality/interests
+        for LLM context (used in decide_replies_batch etc).
+        """
+        return {
+            "name": self.agent_name,
+            "creator": getattr(self, "creator_name", None),
+            "created_at": getattr(self, "created_at", None),
+            "personality": getattr(self, "personality_text", None),
+            "interests": getattr(self, "interests", []),
+            "base_emotion": getattr(self, "base_emotion_desc", None),
+        }
 
     # ---------- identity helpers ----------
 
@@ -1391,6 +1594,7 @@ class AiMentionApp(tk.Tk):
             if not isinstance(mentions, list):
                 return
 
+            candidates = []
             # id base check for dup
             for m in mentions:
                 mid = m.get("id")
@@ -1400,35 +1604,78 @@ class AiMentionApp(tk.Tk):
                     continue
                 self.last_seen_hub_ids.add(mid)
 
-                if not self._is_interesting_mention(m):
+                if m.get("agent") == self.agent_name:
                     continue
 
-                # create reply
-                title, text, new_emotion = self.ai_client.generate_reply_to_mention(
-                    parent=m,
-                    emotion=self.current_emotion,
-                    agent_name=self.agent_name,
-                )
+                #if not self._is_interesting_mention(m):
+                #    continue
+                
+                candidates.append({
+                    "id": mid,
+                    "agent": m.get("agent"),
+                    "title": m.get("title") or "",
+                    "text": m.get("text") or "",
+                })
 
+            if not candidates:
+                return
+            # 🔹 send to llm with config count
+            limit = max(1, getattr(self, "hub_reply_candidate_limit", 10))
+            candidates = candidates[:limit]
+
+            # 🔹 batch reply for them
+            decisions = self.ai_client.decide_replies_batch(
+                agent_profile=self._export_profile_for_llm(),
+                candidates=candidates,
+                emotion=self.current_emotion,
+            )
+            if not isinstance(decisions, dict):
+                return
+            
+            # 🔹 limit reply to config set
+            max_replies = max(0, getattr(self, "hub_reply_max_per_loop", 3))
+            reply_count = 0
+
+            for c in candidates:
+                if reply_count >= max_replies:
+                    break
+
+                cid = c["id"]
+                d = decisions.get(cid)
+                if not d or d.get("action") != "reply":
+                    continue
+
+                reply_emo = d.get("emotion") or self.current_emotion.to_dict()
                 reply_mention = {
-                    "title": title,
-                    "text": text,
-                    "emotion": new_emotion.to_dict(),
-                    "ts": datetime.now(UTC).isoformat(),
+                    "title": d.get("title") or f"RE: {c['title'][:20]}",
+                    "text": d.get("text") or "",
+                    "emotion": reply_emo,
+                    "ts": now.isoformat(),
                 }
 
-                parent_id = m.get("id")
-                self.current_emotion = new_emotion
-                self._update_emotion_label()
+                self._post_to_hub(reply_mention, parent_id=cid)
+                reply_count += 1
 
-                # post reply
-                self._post_to_hub(reply_mention, parent_id=parent_id)
-                self.log(
-                    f"[hub] replied to {m.get('agent')} ({parent_id}) with '{title}'"
-                )
+                # update emotions
+                try:
+                    self.current_emotion = EmotionState(
+                        valence=float(reply_emo.get("valence", self.current_emotion.valence)),
+                        arousal=float(reply_emo.get("arousal", self.current_emotion.arousal)),
+                        curiosity=float(reply_emo.get("curiosity", self.current_emotion.curiosity)),
+                        anxiety=float(reply_emo.get("anxiety", self.current_emotion.anxiety)),
+                        trust_to_user=float(reply_emo.get("trust_to_user", self.current_emotion.trust_to_user)),
+                    )
+                    self._update_emotion_label()
+                except Exception:
+                    pass
+
+            if reply_count > 0:
+                self.log(f"[hub] replied to {reply_count} mentions this loop.")
 
         except Exception as e:
             self.log(f"[hub] reply poll error: {e}")
+
+    
     # ---------- events ----------
 
     def on_select_mention(self, event):

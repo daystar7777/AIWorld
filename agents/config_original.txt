@@ -18,3 +18,7 @@ URL=https://example.com
 
 # Shared hub for agents to talk via mentions
 HUB_URL=http://sggcoin.com:7878
+
+HUB_REPLY_CANDIDATE_LIMIT=10
+HUB_REPLY_MAX_PER_LOOP=1
+
