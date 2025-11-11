@@ -119,15 +119,30 @@ class EmotionState:
     trust_to_user: float = 0.5  # 0..1
 
     def to_short_str(self) -> str:
-        return (
-            f"V={self.valence:.2f}, A={self.arousal:.2f}, "
-            f"C={self.curiosity:.2f}, Anx={self.anxiety:.2f}, "
-            f"T={self.trust_to_user:.2f}"
-        )
+        """Let's create emoji using values"""
+        valence_emoji = "😊" if self.valence > 0.3 else "😐" if self.valence > -0.3 else "😞"
+        arousal_emoji = "🔥" if self.arousal > 0.6 else "🌿"
+        curiosity_emoji = "🤔" if self.curiosity > 0.5 else "😴"
+        anxiety_emoji = "😰" if self.anxiety > 0.4 else "😌"
+        trust_emoji = "💞" if self.trust_to_user > 0.6 else "🕳️"
+        return f"{valence_emoji}={self.valence:.2f}/{arousal_emoji}={self.arousal:.2f}/{curiosity_emoji}={self.curiosity:.2f}/{anxiety_emoji}={self.anxiety:.2f}/{trust_emoji}={self.trust_to_user:.2f}"
+        # return (
+        #     f"V={self.valence:.2f}, A={self.arousal:.2f}, "
+        #     f"C={self.curiosity:.2f}, Anx={self.anxiety:.2f}, "
+        #     f"T={self.trust_to_user:.2f}"
+        # )
 
     def clone(self) -> "EmotionState":
         return EmotionState(**asdict(self))
 
+    def to_emoji(self) -> str:
+        """Let's create emoji using values"""
+        valence_emoji = "😊" if self.valence > 0.3 else "😐" if self.valence > -0.3 else "😞"
+        arousal_emoji = "🔥" if self.arousal > 0.6 else "🌿"
+        curiosity_emoji = "🤔" if self.curiosity > 0.5 else "😴"
+        anxiety_emoji = "😰" if self.anxiety > 0.4 else "😌"
+        trust_emoji = "💞" if self.trust_to_user > 0.6 else "🕳️"
+        return f"{valence_emoji}{arousal_emoji}{curiosity_emoji}{anxiety_emoji}{trust_emoji}"
 
 @dataclass
 class ChatMessage:
@@ -177,7 +192,89 @@ class MemoryManager:
         self.short_max_hours = 24
         self.long_max_items_for_summary = 300
 
+        # seen sets for deduplication
+        self._seen_permanent = self._load_seen_norm_texts(self.permanent_path)
+        self._seen_long = self._load_seen_norm_texts(self.long_path)
+        self._seen_short_pairs = self._load_seen_short_pairs(self.short_path)
+
     # --- utils ---
+
+    def _normalize_text(self, text: str) -> str:
+        if not text:
+            return ""
+        return " ".join(text.strip().split())
+    
+    def _load_seen_norm_texts(self, path: Path) -> set[str]:
+        """Load normalized text set from JSONL (for long/permanent)."""
+        seen = set()
+        if not path.exists():
+            return seen
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    t = obj.get("text")
+                    if not t:
+                        continue
+                    norm = self._normalize_text(t)
+                    if norm:
+                        seen.add(norm)
+        except Exception:
+            pass
+        return seen
+
+    def _load_seen_short_pairs(self, path: Path) -> set[tuple[str, str]]:
+        """Load (normalized text, ts) pairs for short-term dedupe."""
+        seen = set()
+        if not path.exists():
+            return seen
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    t = obj.get("text")
+                    ts = obj.get("ts")
+                    if not t or not ts:
+                        continue
+                    norm = self._normalize_text(t)
+                    if norm:
+                        seen.add((norm, ts))
+        except Exception:
+            pass
+        return seen
+
+    def _load_seen_texts(self, path: Path) -> set[str]:
+        seen = set()
+        if not path.exists():
+            return seen
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    t = obj.get("text")
+                    if t:
+                        seen.add(self._normalize_text(t))
+        except Exception:
+            pass
+        return seen
 
     def _append_jsonl(self, path: Path, obj: dict):
         with open(path, "a", encoding="utf-8") as f:
@@ -186,16 +283,42 @@ class MemoryManager:
     # --- public add methods ---
 
     def add_short(self, event: dict):
-        event.setdefault("ts", datetime.utcnow().isoformat())
+        # ensure timestamp first
+        ts = event.get("ts")
+        if not ts:
+            ts = datetime.utcnow().isoformat()
+            event["ts"] = ts
+
+        text = event.get("text", "")
+        norm = self._normalize_text(text)
+
+        if norm:
+            key = (norm, ts)
+            if key in self._seen_short_pairs:
+                return  # exact duplicate (same content, same time)
+            self._seen_short_pairs.add(key)
+
         self._append_jsonl(self.short_path, event)
 
     def add_long(self, item: dict):
+        text = item.get("text", "")
+        norm = self._normalize_text(text)
+        if not norm or norm in self._seen_long:
+            return
+
         item.setdefault("ts", datetime.utcnow().isoformat())
         self._append_jsonl(self.long_path, item)
+        self._seen_long.add(norm)
 
     def add_permanent(self, item: dict):
+        text = item.get("text", "")
+        norm = self._normalize_text(text)
+        if not norm or norm in self._seen_permanent:
+            return  # skip duplicates or empty
+
         item.setdefault("ts", datetime.utcnow().isoformat())
         self._append_jsonl(self.permanent_path, item)
+        self._seen_permanent.add(norm)
 
     # --- mentions persistence ---
 
@@ -1230,7 +1353,10 @@ class AiMentionApp(tk.Tk):
     # ---------- helpers ----------
 
     def _update_emotion_label(self):
-        self.lbl_emotion.config(text=self.current_emotion.to_short_str())
+        e = self.current_emotion
+        emoji = e.to_emoji()
+        txt = f"Emotion {emoji}  V={e.valence:.2f}, A={e.arousal:.2f}, C={e.curiosity:.2f}, Anx={e.anxiety:.2f}, T={e.trust_to_user:.2f}"
+        self.lbl_emotion.config(text=txt)
 
     def _set_status(self, text: str):
         self.lbl_status.config(text=text)
