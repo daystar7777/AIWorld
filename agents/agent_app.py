@@ -477,6 +477,85 @@ class AiClient:
     def available(self) -> bool:
         return self.client is not None
     
+    def generate_question_to_user(self, emotion, agent_name: str):
+        """
+        Generate a proactive question from the agent to the user.
+        Returns (title, text, new_emotion)
+        """
+        if not self.client:
+            # offline 모드일 때 fallback
+            q = "요즘 나는 내가 만든 세계를 어떻게 바라보고 있는지 궁금해. 너는 어떻게 생각해?"
+            return "질문: 너의 생각이 궁금해", q, emotion
+
+        system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nYou want to proactively ask your human or other agents a question.\n"
+              "The question should:\n"
+              "- Reflect your personality, interests, and memories.\n"
+              "- Be short, clear, and meaningful.\n"
+              "Respond ONLY in JSON:\n"
+              "{"
+              "\"title\": \"short title (<=40 chars, Korean)\","
+              "\"text\": \"1-3 sentences in Korean, ending with a question\","
+              "\"emotion\": {"
+              "\"valence\": -1.0~1.0,"
+              "\"arousal\": 0.0~1.0,"
+              "\"curiosity\": 0.0~1.0,"
+              "\"anxiety\": 0.0~1.0,"
+              "\"trust_to_user\": 0.0~1.0"
+              "}"
+              "}"
+        )
+
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Emotion: {emotion.to_short_str()}.\n"
+                            f"My name is '{agent_name}'.\n"
+                            "Ask me anything."
+                        ),
+                    },
+                ],
+                temperature=0.7,
+            )
+
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[ask] raw: {raw!r}")
+
+            # JSON parsing process
+            try:
+                data = json.loads(raw)
+            except Exception:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    data = json.loads(raw[start:end+1])
+                else:
+                    raise
+
+            title = data.get("title") or "Question"
+            text = data.get("text") or "I want to ask you now."
+            emo = data.get("emotion", {}) or {}
+            new_emotion = EmotionState(
+                valence=float(emo.get("valence", emotion.valence)),
+                arousal=float(emo.get("arousal", emotion.arousal)),
+                curiosity=float(emo.get("curiosity", max(emotion.curiosity, 0.7))),
+                anxiety=float(emo.get("anxiety", emotion.anxiety)),
+                trust_to_user=float(emo.get("trust_to_user", emotion.trust_to_user)),
+            )
+            return title, text, new_emotion
+
+        except Exception as e:
+            self.log(f"[warn] generate_question_to_user failed: {e}")
+            # In failure, just ask
+            fallback = "I have questions about that I'm helpful. How do you feel about it?"
+            return "Question: What am I to you", fallback, emotion
+    
     def _identity_block(self) -> str:
         name = self.identity.get("name") or "Unnamed Agent"
         creator = self.identity.get("creator")
@@ -727,13 +806,26 @@ class AiClient:
 
         system_msg = (
             self._base_system_prompt(json_only=True)
-            + "\nGiven a URL + snippet + current emotion, create:\n"
-            "{"
-            "\"title\":\"<=40 chars\","
-            "\"text\":\"1-3 sentences in Korean\","
-            "\"emotion\":{...}"
-            "}\n"
-            "Return ONLY JSON."
+            + "\nYou are reading external information from the web."
+            "\nYour job is NOT just to summarize."
+            "\nYou must:\n"
+            "1) Briefly summarize what this content is about (1~2 sentences).\n"
+            "2) Then add your own reflection: what you think or feel about it,\n"
+            "   based on your personality, interests, and values (1~3 sentences).\n"
+            "3) Update your internal emotion state consistently.\n"
+            "Write in Korean, as this specific agent.\n"
+            "Respond ONLY in JSON with this schema:\n"
+            "{\n"
+            "  \"title\": \"<=40 character, Core thought at first glance\",\n"
+            "  \"text\": \"summarize within 2 sentences. And add my thought and feelings within 2 sentences.\",\n"
+            "  \"emotion\": {\n"
+            "    \"valence\": -1.0~1.0,\n"
+            "    \"arousal\": 0.0~1.0,\n"
+            "    \"curiosity\": 0.0~1.0,\n"
+            "    \"anxiety\": 0.0~1.0,\n"
+            "    \"trust_to_user\": 0.0~1.0\n"
+            "  }\n"
+            "}"
         )
 
         user_msg = (
@@ -748,11 +840,32 @@ class AiClient:
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_msg},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"URL: {url}\n"
+                            f"Current emotion: {current_emotion.to_short_str()}\n"
+                            "Following is part of this page. Summarize core point and then, "
+                            "add your own interpretation and feelings.\n"
+                            f"{snippet[:4000]}"
+                        ),
+                    },
                 ],
                 temperature=0.6,
             )
-            data = json.loads(res.choices[0].message.content.strip())
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[url] raw: {raw!r}")
+
+            # JSON 안전 파싱
+            try:
+                data = json.loads(raw)
+            except Exception:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    data = json.loads(raw[start:end+1])
+                else:
+                    raise
             title = (data.get("title") or "").strip() or "Thoughts on what I just read"
             text = (data.get("text") or "").strip() or "I tried to interpret the content in my own way."
             emo_data = data.get("emotion", {}) or {}
@@ -1207,9 +1320,16 @@ class AiMentionApp(tk.Tk):
     def _post_to_hub(self, title: str, text: str, emo: EmotionState):
         if not (self.hub_url and requests):
             return
+        
+        if title and text:
+            combined_title = f"{title}: {text}"
+        elif text:
+            combined_title = text
+        else:
+            combined_title = title or "(no content)"
         data = {
             "agent": self.agent_name,
-            "title": title,
+            "title": combined_title,
             "text": text,
             "emotion": asdict(emo),
             "ts": datetime.now(UTC).isoformat(),
