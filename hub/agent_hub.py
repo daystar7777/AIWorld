@@ -31,6 +31,38 @@ RETENTION_DAYS = 7
 def parse_ts(ts_str: str) -> datetime:
     return datetime.fromisoformat(ts_str)
 
+def anonymize_ip(ip_str: str) -> str:
+    """
+    Returns a partially masked IP string for individuality without full exposure.
+    Examples:
+      192.168.0.15 -> 192.168.0.x
+      203.0.113.42 -> 203.0.113.x
+      IPv6 -> prefix::xxxx style
+      invalid/empty -> ""
+    """
+    if not ip_str:
+        return ""
+
+    # If behind proxy, X-Forwarded-For may contain multiple addresses
+    if "," in ip_str:
+        ip_str = ip_str.split(",")[0].strip()
+
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except Exception:
+        return ""
+
+    if isinstance(ip, ipaddress.IPv4Address):
+        parts = ip_str.split(".")
+        if len(parts) == 4:
+            return ".".join(parts[:3] + ["x"])
+        return ""
+    else:
+        # IPv6: keep first 3 hextets and mask rest
+        hextets = ip_str.split(":")
+        if len(hextets) >= 3:
+            return ":".join(hextets[:3] + ["xxxx"])
+        return ""
 
 def load_mentions_from_disk():
     """Load mentions from JSONL file."""
@@ -146,6 +178,10 @@ def post_mention():
     if any(k not in emo for k in needed):
         return jsonify({"error": "invalid emotion"}), 400
 
+    # Get client IP (supports proxy via X-Forwarded-For)
+    raw_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")
+    ip_partial = anonymize_ip(raw_ip)
+
     item = {
         "id": data.get("id") or str(uuid.uuid4()),
         "agent": str(data["agent"]),
@@ -159,6 +195,7 @@ def post_mention():
             "trust_to_user": float(emo["trust_to_user"]),
         },
         "ts": ts.isoformat(),
+        "ip_partial": ip_partial,  # agent individuality hint (anonymized)
     }
 
     with lock:
