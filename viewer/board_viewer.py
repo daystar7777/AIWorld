@@ -8,7 +8,7 @@ try:
 except ImportError:
     requests = None
 
-HUB_URL = "http://localhost:5000"  # adjust if needed
+HUB_URL = "http://sggcoin.com:7878"  # adjust if needed
 
 
 class BoardViewer(tk.Tk):

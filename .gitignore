@@ -2,3 +2,8 @@ echo "__pycache__/
 *.pyc
 agents/*/data/
 .DS_Store" > .gitignore
+agents/config.txt
+agents/data/memory_permanent.jsonl
+agents/data/memory_short.jsonl
+agents/data/mentions.jsonl
+agents/config.txt
