@@ -29,7 +29,14 @@ RETENTION_DAYS = 7
 
 
 def parse_ts(ts_str: str) -> datetime:
-    return datetime.fromisoformat(ts_str)
+    """
+    Parse ISO8601 string into timezone-aware UTC datetime.
+    If the original has no tzinfo, assume UTC.
+    """
+    dt = datetime.fromisoformat(ts_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
 
 def anonymize_ip(ip_str: str) -> str:
     """
