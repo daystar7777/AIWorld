@@ -1,4 +1,3 @@
-네, 깃헙 README.md나 TODO.md 파일에 바로 추가하실 수 있도록 Markdown 형식으로 정리해 드릴게요.
 
 🚀 AI Agent Roadmap: Future Features
 Here is the planned TODO list for the next phase of agent development.
