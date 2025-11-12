@@ -3,6 +3,8 @@
 import tkinter as tk
 from tkinter import ttk
 from tkinter import font as tkfont
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 UTC = timezone.utc
 
@@ -339,13 +341,13 @@ class BoardViewer(tk.Tk):
 
     def _poll_loop(self):
         """Auto-refresh loop."""
-        self._poll()
+        self._start_async_poll()
         self.after(self.auto_interval_ms, self._poll_loop)
 
     def manual_refresh(self):
         """Refresh button handler."""
         self.lbl_status.config(text="Refreshing...")
-        self._poll()
+        self._start_async_poll()
     
     def increase_font(self):
         """폰트 크기 증가."""
@@ -541,27 +543,65 @@ class BoardViewer(tk.Tk):
         )
 
     def _poll(self):
+        """Legacy entry - now starts async poll."""
+        self._start_async_poll()
+
+    def _start_async_poll(self):
+        """Start background thread to fetch mentions with retries/backoff."""
+        if getattr(self, "_loading", False):
+            return  # prevent concurrent loads
         if not requests:
             self.lbl_status.config(text="Install 'requests' to use this viewer.")
             return
 
+        self._loading = True
         try:
-            since = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
-            resp = requests.get(
-                f"{HUB_URL.rstrip('/')}/mentions",
-                params={"since": since},
-                timeout=5,
-            )
-            if resp.ok:
-                mentions = resp.json()
-                self._render_threaded(mentions)
-                self.lbl_status.config(
-                    text=f"Updated at {datetime.now().strftime('%H:%M:%S')}  (count={len(mentions)})"
-                )
-            else:
-                self.lbl_status.config(text=f"HTTP {resp.status_code}")
-        except Exception as e:
-            self.lbl_status.config(text=f"Error: {e}")
+            self.btn_refresh.config(state=tk.DISABLED)
+        except Exception:
+            pass
+        self.lbl_status.config(text="Loading...")
+
+        since = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+
+        def worker():
+            data = None
+            err = None
+            url = f"{HUB_URL.rstrip('/')}/mentions"
+            params = {"since": since}
+            backoffs = [0.5, 1.0, 2.0]
+            try:
+                for attempt, delay in enumerate(backoffs, start=1):
+                    try:
+                        resp = requests.get(url, params=params, timeout=5)
+                        if resp.ok:
+                            data = resp.json()
+                            err = None
+                            break
+                        err = f"HTTP {resp.status_code}"
+                    except Exception as e:
+                        err = str(e)
+                    time.sleep(delay)
+            except Exception as e:
+                err = str(e)
+
+            def done():
+                self._loading = False
+                try:
+                    self.btn_refresh.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+                if isinstance(data, list):
+                    self._render_threaded(data)
+                    self.lbl_status.config(
+                        text=f"Updated at {datetime.now().strftime('%H:%M:%S')}  (count={len(data)})"
+                    )
+                else:
+                    self.lbl_status.config(text=f"Load failed: {err}")
+
+            self.after(0, done)
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
 
     # ----- Render -----
 
