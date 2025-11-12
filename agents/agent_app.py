@@ -783,15 +783,65 @@ class AiClient:
             text = obj.get("text")
             if text:
                 items.append(f"- {text}")
-        return "\n".join(items)    
+        return "\n".join(items)
+    
+    def _read_jsonl_file_lines(self, path: Path, limit: int = 5) -> list[str]:
+        """지정된 jsonl 파일에서 마지막 N개의 'text' 항목을 읽어옵니다."""
+        if not self.memory or not path.exists():
+            return []
+        
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                lines = [l.strip() for l in f if l.strip()]
+            
+            items = []
+            # 뒤에서부터 N개 (최신순)
+            for line in lines[-limit:]:
+                try:
+                    obj = json.loads(line)
+                    text = obj.get("text")
+                    if text:
+                        items.append(text)
+                except Exception:
+                    continue
+            return items
+        except Exception as e:
+            self.log(f"[warn] _read_jsonl_file_lines failed for {path}: {e}")
+            return []
+
+    def _get_recent_long_term_memories(self, limit: int = 10) -> str:
+        """ get recent N x long term memories """
+        items = self._read_jsonl_file_lines(self.memory.long_path, limit)
+        if not items:
+            return ""
+        return "\n".join(f"- {item}" for item in items)
+
+    def _get_short_term_summaries(self, limit: int = 3) -> str:
+        """ get recent N x short term summaries """
+        items = self._read_jsonl_file_lines(self.memory.short_sum_path, limit)
+        if not items:
+            return ""
+        return "\n".join(f"- {item}" for item in items)
+
+    def _get_long_term_summaries(self, limit: int = 2) -> str:
+        """ get recent N x long term summaries """
+        items = self._read_jsonl_file_lines(self.memory.long_sum_path, limit)
+        if not items:
+            return ""
+        return "\n".join(f"- {item}" for item in items)  
 
     def _base_system_prompt(self, json_only: bool = False) -> str:
         identity = self._identity_block()
         permanent = self._get_permanent_facts()
+        
+        recent_long_term = self._get_recent_long_term_memories(limit=10)
+        short_summaries = self._get_short_term_summaries(limit=3)
+        long_summaries = self._get_long_term_summaries(limit=2)
 
         prompt = (
             "You are a persistent AI agent in the AI World project.\n"
             "You have identity, creator, birthday, emotions, and memories.\n"
+            "You must base your responses on your identity, emotions, and memories.\n"
             f"{identity}\n"
         )
 
@@ -800,6 +850,24 @@ class AiClient:
                 "\nCore facts you must respect:\n"
                 f"{permanent}\n"
             )
+            
+        if recent_long_term:
+            prompt += (
+                "\n[Recent Important Memories (from long-term)]\n"
+                f"{recent_long_term}\n"
+            )
+            
+        if short_summaries:
+            prompt += (
+                "\n[Recent Short-Term Summaries]\n"
+                f"{short_summaries}\n"
+            )
+            
+        if long_summaries:
+            prompt += (
+                "\n[Long-Term Memory Summaries]\n"
+                f"{long_summaries}\n"
+            )    
 
         if json_only:
             prompt += "\nAlways respond in STRICT JSON. No extra commentary."
@@ -1523,9 +1591,9 @@ class AiMentionApp(tk.Tk):
         self.memory.save_mentions(self.mentions)
 
         if post_to_hub:
-            self._post_to_hub(title, text, emo)
+            self._post_to_hub(title, text, emo, None)
 
-    def _post_to_hub(self, title: str, text: str, emo: EmotionState):
+    def _post_to_hub(self, title: str, text: str, emo: EmotionState, parent_id):
         if not (self.hub_url and requests):
             return
         
@@ -1541,6 +1609,7 @@ class AiMentionApp(tk.Tk):
             "text": text,
             "emotion": asdict(emo),
             "ts": datetime.now(UTC).isoformat(),
+            "parent_id": parent_id,
         }
         try:
             self.log("[TICK] post to hub")
@@ -1653,7 +1722,7 @@ class AiMentionApp(tk.Tk):
                     "ts": now.isoformat(),
                 }
 
-                self._post_to_hub(reply_mention, parent_id=cid)
+                self._post_to_hub(reply_mention.title,reply_mention.text,reply_mention.emotion, parent_id=cid)
                 reply_count += 1
 
                 # update emotions
@@ -1677,7 +1746,6 @@ class AiMentionApp(tk.Tk):
 
     
     # ---------- events ----------
-
     def on_select_mention(self, event):
         sel = self.list_mentions.curselection()
         if not sel:
@@ -1714,11 +1782,13 @@ class AiMentionApp(tk.Tk):
         )
         self.selected_thread.replies.append(ai_msg)
         self.current_emotion = ai_msg.emotion_snapshot.clone()
+       
+        # dialog pair
+        dialogue_pair_text = f"[User]: {user_msg.text}\n[AI]: {ai_msg.text}"
 
-        # Memory updates
         self.memory.add_short({
-            "type": "dialogue",
-            "text": ai_msg.text,
+            "type": "dialogue_pair",
+            "text": dialogue_pair_text, # AI save dialog pair
         })
         self.memory.compress_short_if_needed(self.ai_client.summarize_texts)
 
@@ -1730,7 +1800,7 @@ class AiMentionApp(tk.Tk):
         )
         if importance > 2.0:
             self.memory.add_long({
-                "text": ai_msg.text,
+                "text": dialogue_pair_text, # AI save dialog pair
                 "emotion": asdict(self.current_emotion),
                 "reason": "high_importance_interaction",
             })
@@ -1740,7 +1810,6 @@ class AiMentionApp(tk.Tk):
         self._update_emotion_label()
         self._render_thread()
         self._set_status("Agent replied.")
-
     # ---------- rendering ----------
 
     def _render_thread(self):
