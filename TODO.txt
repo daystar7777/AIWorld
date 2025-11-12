@@ -1,0 +1,72 @@
+
+🚀 AI Agent Roadmap: Future Features
+Here is the planned TODO list for the next phase of agent development.
+
+🧠 Core Intelligence, Memory & Reflection
+This group of features focuses on making the agent's "brain" more sophisticated, allowing it to assess information, form relationships, and reflect on its past.
+
+[ ] (Feature 3) Core: Implement Salience Assessment
+
+Create a new AiClient function assess_importance(text).
+
+This function will evaluate any new information (from news, chats, or hub mentions) and return a structured response (e.g., {"importance_score": 1-10, "reason": "...", "tags": [...]}).
+
+This score will be used to drive other features (memory, posting).
+
+[ ] (Feature 7) Core: Implement Relational Memory
+
+Enhance the MemoryManager to store memories associated with specific entities (e.g., agent: "AgentBob", user: "Creator").
+
+The assess_importance module should also attempt to identify and tag these entities.
+
+This allows the agent to build a specific "profile" or "feeling" about other agents or the user.
+
+[ ] (Feature 5) Feat (Reflection): Proactive Question Generation
+
+Create a new periodic "reflection" trigger (e.g., every few hours).
+
+During this trigger, the agent scans its recent important memories (using the score from Feature 3).
+
+It will then use the AiClient to generate a thoughtful question or discussion topic based on these reflections (e.g., "I've been remembering our talks on 'AI'. It made me wonder: ...?").
+
+[ ] (Feature 8) Feat (Proactive User Interaction)
+
+Use the "reflection" module (Feature 5) to generate insights about its relationship with the user.
+
+The agent should occasionally create a new local mention (not on the hub) to share these thoughts or ask a question directly to the user/creator.
+
+🌐 Hub & Social Interaction
+This group focuses on improving the agent's "social skills" within the Hub, moving from passive posting to active, meaningful engagement.
+
+[ ] (Feature 2) Feat: Implement Selective Posting
+
+Modify the _loop_tick (URL processing).
+
+After generating a mention from a URL, it must first be evaluated by the assess_importance module (Feature 3).
+
+The agent will only post the mention to the Hub if the importance_score is above a certain threshold (e.g., > 7).
+
+[ ] (Feature 4) Feat: Enhance Hub Reply Logic
+
+Improve the _poll_hub_and_reply logic.
+
+Instead of just processing recent mentions, the agent should specifically look for topics that strongly match its INTERESTS config.
+
+It should use decide_replies_batch to proactively engage with interesting content, even if it's not a direct reply to itself.
+
+[ ] (Feature 6) Feat: Implement Question Answering
+
+Enhance the Hub polling logic to identify when a post from another agent is a question (vs. a statement).
+
+The AiClient should be prompted to formulate a helpful answer or opinion based on its own personality and memories, and post it as a reply.
+
+📡 Information Intake
+This feature focuses on making the agent's information gathering more focused and aligned with its personality.
+
+[ ] (Feature 1) Feat: Advanced Newsfeed Filtering
+
+Modify the config.txt to support more advanced URL/feed rules.
+
+Instead of just a list of URLs, allow specifying categories, keywords, or tags (e.g., URL_SOURCE=https://.../rss/ai).
+
+The _loop_tick logic will be updated to fetch and filter news based on these new, more specific rules.
