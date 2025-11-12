@@ -606,12 +606,17 @@ class BoardViewer(tk.Tk):
     # ----- Render -----
 
     def _render_threaded(self, mentions):
-        """parent_id based thread with treeview"""
-        # Clear tree
+        """parent_id based thread with treeview (incremental to avoid UI freeze)"""
+        # Cancel any in-progress render by bumping a token
+        token = getattr(self, "_render_token", 0) + 1
+        self._render_token = token
+
+        # Clear tree fast
         for item in self.tree.get_children():
             self.tree.delete(item)
         
         if not mentions:
+            self.lbl_status.config(text="No mentions")
             return
 
         # Store mentions by id for quick lookup
@@ -620,7 +625,7 @@ class BoardViewer(tk.Tk):
         # id -> mention
         by_id = {}
         # parent_id -> [children...]
-        children = {}
+        children_map = {}
 
         for m in mentions:
             mid = m.get("id")
@@ -628,14 +633,13 @@ class BoardViewer(tk.Tk):
                 continue
             by_id[mid] = m
             self.mentions_by_id[mid] = m
-            
-            children.setdefault(mid, [])
+            children_map.setdefault(mid, [])
 
         for m in mentions:
             pid = m.get("parent_id")
             mid = m.get("id")
             if pid and pid in by_id and pid != mid:
-                children.setdefault(pid, []).append(m)
+                children_map.setdefault(pid, []).append(m)
 
         # root mention with no parents
         roots = [
@@ -646,23 +650,41 @@ class BoardViewer(tk.Tk):
         # sort in reverse time order (newest first)
         roots.sort(key=lambda m: parse_ts_safe(m.get("ts")), reverse=True)
 
-        # draw tree with recursion
-        def render_node(m, parent=""):
-            item_id = self._insert_tree_item(m, parent)
-            child_list = sorted(children.get(m.get("id"), []),
-                              key=lambda x: parse_ts_safe(x.get("ts")), reverse=True)
-            
-            # 자식이 있으면 재귀적으로 렌더링
-            if child_list:
-                for child in child_list:
-                    render_node(child, item_id)
-            else:
-                # 자식이 없어도 접힘 표시를 위해 더미 자식 항목 추가
-                dummy_id = self.tree.insert(item_id, "end", text="", values=("__dummy__",))
-                self.tree.item(dummy_id, open=False)
+        # Build a work stack for iterative DFS: (mention, parent_item)
+        work_stack = [(m, "") for m in roots[::-1]]  # reverse to pop in order
 
-        for root in roots:
-            render_node(root)
+        self.lbl_status.config(text="Rendering...")
+
+        def process_batch():
+            # Abort if new render started
+            if token != getattr(self, "_render_token", None):
+                return
+            inserted = 0
+            batch_limit = 300  # tune for responsiveness
+            while work_stack and inserted < batch_limit:
+                m, parent_item = work_stack.pop()
+                item_id = self._insert_tree_item(m, parent_item)
+                # children newest-first
+                childs = sorted(children_map.get(m.get("id"), []),
+                                key=lambda x: parse_ts_safe(x.get("ts")), reverse=True)
+                if childs:
+                    # push in reverse order so first child processed next
+                    for ch in childs[::-1]:
+                        work_stack.append((ch, item_id))
+                else:
+                    # ensure fold icon by dummy child
+                    dummy_id = self.tree.insert(item_id, "end", text="", values=("__dummy__",))
+                    self.tree.item(dummy_id, open=False)
+                inserted += 1
+            if work_stack and token == getattr(self, "_render_token", None):
+                # schedule next chunk
+                self.after(1, process_batch)
+            else:
+                # done
+                self.lbl_status.config(text=f"Rendered {len(mentions)} items")
+
+        # kick off first chunk
+        self.after(1, process_batch)
 
     def _insert_tree_item(self, m, parent=""):
         """트리뷰에 항목 추가하고 ID 반환"""
