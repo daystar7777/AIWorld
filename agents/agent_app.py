@@ -483,6 +483,75 @@ class AiClient:
     def available(self) -> bool:
         return self.client is not None
     
+    def reflect_on_memories(self, memories_text: str) -> list[dict]:
+        """
+        Create insight with recent memories
+
+        """
+        self.log("[reflect_on_memories] Beginning...")
+        
+        default_response = []
+        if not self.client:
+            return default_response
+
+        system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nYou are this agent's 'self-reflection' module."
+            "\nA list of recent important memories has been provided."
+            "\nFind patterns, themes, or connections between these memories."
+            "\nBased on these patterns, generate 1-3 'new insights' or 'discussion questions'."
+            "\nRespond ONLY in the following strict JSON 'array' format:"
+            "\n["
+            "\n  {"
+            "\n    \"text\": \"The newly derived insight or question (e.g., 'I seem to be consistently interested in AI ethics.')\""
+            "\n  },"
+            "\n  { ... }"
+            "\n]"
+        )
+
+        user_msg = (
+            "The following are the memories I recently thought were important:\n\n"
+            f"{memories_text}\n\n"
+            "Please generate 1-3 new insights or questions based on these memories."
+        )
+
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.7, # For creative answer, raised value
+            )
+            
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[reflect_on_memories] raw: {raw!r}")
+
+            # --- Strict JSON array parsing ---
+            data = None
+            try:
+                data = json.loads(raw)
+            except Exception:
+                start = raw.find("[")
+                end = raw.rfind("]")
+                if start != -1 and end != -1 and end > start:
+                    data = json.loads(raw[start:end+1])
+                else:
+                    raise
+            
+            if not isinstance(data, list):
+                self.log("[reflect_on_memories] data is not an list")
+                return default_response
+                
+            # only check and return 'text' field
+            insights = [{"text": item.get("text")} for item in data if isinstance(item, dict) and item.get("text")]
+            return insights
+
+        except Exception as e:
+            self.log(f"[reflect_on_memories] function failure: {e}")
+            return default_response
+    
     def decide_replies_batch(self, agent_profile: dict, candidates: list, emotion) -> dict:
         """
         Batch decide which hub mentions to reply to.
@@ -1150,6 +1219,70 @@ class AiMentionApp(tk.Tk):
         self._render_board()
         self._schedule_loop()
         self._schedule_board_poll()
+        self._schedule_reflection_tick() # adding reflection
+
+    def _schedule_reflection_tick(self):
+        # 1시간(3600초)마다 반추 실행 (주기는 조절 가능)
+        self.after(3_600_000, self._reflection_tick)
+
+    def _reflection_tick(self):
+        self.log("[REFLECT] Reflecting memories...")
+        
+        # 1. Retrieve recent important long term memories        
+        try:
+            recent_important_memories = self.ai_client._get_recent_long_term_memories(limit=20)
+            
+            if not recent_important_memories or len(recent_important_memories.split('\n')) < 5:
+                self.log("[REFLECT] Not enough memories to reflect")
+                self._schedule_reflection_tick() # 다음 스케줄 예약
+                return
+
+            # 2. Let's do reflect            
+            new_insights_or_questions = self.ai_client.reflect_on_memories(
+                recent_important_memories
+            )
+            
+            # 3. process reflect
+            if not new_insights_or_questions:
+                self.log("[REFLECT] No new insight.")
+            else:
+                self.log(f"[REFLECT] {len(new_insights_or_questions)} insight created.")
+                for item in new_insights_or_questions:
+                    text = item.get("text")
+                    if not text:
+                        continue
+                        
+                    # 4. Insight is important information                    
+                    assessment = self.ai_client.assess_importance(text)
+                    score = assessment.get("importance_score", 5)
+                    
+                    if score >= 8: # Let's evaluate it
+                        self.log(f"[REFLECT] Important insight(score: {score}) is stored in the long term memory: {text}")
+                        self.memory.add_long({
+                            "text": text,
+                            "importance": score,
+                            "reason": assessment.get("reason_for_importance", "Reflection"),
+                            "tags": assessment.get("tags", ["reflection", "insight"]),
+                            "source": "self_reflection",
+                        })
+
+                    # 5. Let's post on hub                     
+                    if assessment.get("requires_hub_post", False) and assessment.get("generates_question"):
+                        self.log(f"[REFLECT] Created question into hub: {text}")
+                        new_emo = self.current_emotion.clone()
+                        new_emo.curiosity = min(1.0, new_emo.curiosity + 0.3) # Add curiosity
+                        self._add_mention(
+                            title=f"A question from reflection: {text[:30]}...",
+                            text=text,
+                            emo=new_emo,
+                            post_to_hub=True
+                        )
+
+        except Exception as e:
+            self.log(f"[REFLECT] Error in reflection: {e}")
+        
+        # 4. Schedule next reflection
+        self._schedule_reflection_tick()
 
     def _export_profile_for_llm(self) -> dict:
         """
