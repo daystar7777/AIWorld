@@ -1645,10 +1645,10 @@ class AiMentionApp(tk.Tk):
                 self.memory.summarize_long_if_needed(self.ai_client.summarize_texts)
             if assessment.get("requires_hub_post", False):
                 self.log(f"[hub] importance {score}, Hub posting with mention.")
-                self._add_mention(title, text, emo, post_to_hub=False)
+                self._add_mention(title, text, emo, post_to_hub=True)
                 self._set_status(f"Importance metion created: {title}")
             else:
-                self._add_mention(title, text, emo, post_to_hub=True)  
+                self._add_mention(title, text, emo, post_to_hub=False)  
             # short memory + compression
             self.memory.add_short({
                 "type": "url_mention",
