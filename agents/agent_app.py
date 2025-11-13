@@ -590,7 +590,7 @@ class AiClient:
             + "\nYou are this agent's 'self-reflection' module."
             "\nA list of recent important memories has been provided."
             "\nFind patterns, themes, or connections between these memories."
-            "\nBased on these patterns, generate 1-3 'new insights' or 'discussion questions'."
+            "\nBased on these patterns, generate 1-5 'new insights' or 'discussion questions'."
             "\nRespond ONLY in the following strict JSON 'array' format:"
             "\n["
             "\n  {"
@@ -603,7 +603,7 @@ class AiClient:
         user_msg = (
             "The following are the memories I recently thought were important:\n\n"
             f"{memories_text}\n\n"
-            "Please generate 1-3 new insights or questions based on these memories."
+            "Please generate 1-5 new insights or questions based on these memories in Korean. If possible, add your description to insights and questions also."
         )
 
         try:
