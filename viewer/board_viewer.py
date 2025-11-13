@@ -208,13 +208,18 @@ class BoardViewer(tk.Tk):
         )
         self.btn_refresh.pack(side=tk.RIGHT, padx=8, pady=4)
 
-        # --- Main area: Tree only ---
+        # --- Main area: PanedWindow (Left: Tree, Right: Content) ---
         main = tk.Frame(self, bg="#111111")
         main.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(0, 6))
 
-        # Tree view
-        tree_frame = tk.Frame(main, bg="#111111")
+        # PanedWindow for resizable split
+        self.paned_window = ttk.PanedWindow(main, orient=tk.HORIZONTAL)
+        self.paned_window.pack(fill=tk.BOTH, expand=True)
+
+        # --- Left Pane: Tree view ---
+        tree_frame = tk.Frame(self.paned_window, bg="#111111")
         tree_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.paned_window.add(tree_frame, weight=1) # Add to paned window
 
         # Treeview 스타일 설정
         style = ttk.Style()
@@ -302,17 +307,59 @@ class BoardViewer(tk.Tk):
         # 트리뷰 크기 변경 시 컬럼 너비 자동 조정
         self.tree.bind("<Configure>", adjust_column_width)
 
-        # Tree open event - 항목을 열 때 내용 표시
-        self.tree.bind("<<TreeviewOpen>>", self.on_tree_open)
-        self.tree.bind("<<TreeviewClose>>", self.on_tree_close)
+         # S: Tree open event - 항목을 열 때 내용 표시 (REMOVED)
+        # self.tree.bind("<<TreeviewOpen>>", self.on_tree_open)
+        # self.tree.bind("<<TreeviewClose>>", self.on_tree_close)
         
-        # 태그 스타일 설정 (판넬 배경 효과)
-        panel_bg = "#3A3A3A"  # 옅은 회색 패널 배경
-        self.tree.tag_configure("content", background=panel_bg, foreground="#EEEEEE")
-        self.tree.tag_configure("header", background=panel_bg, foreground="#FFFFFF")
-        # 다음 항목과 구분을 위한 공백 라인 스타일
-        self.tree.tag_configure("spacer", background="#2A2A2A", foreground="#2A2A2A")
+        # S: <<<TreeviewSelect>> event - BINDING ADDED
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         
+        # 태그 스타일 설정 (판넬 배경 효과) (REMOVED - content tags not needed)
+        # self.tree.tag_configure("content", background=panel_bg, foreground="#EEEEEE")
+        # self.tree.tag_configure("header", background=panel_bg, foreground="#FFFFFF")
+        # self.tree.tag_configure("spacer", background="#2A2A2A", foreground="#2A2A2A")
+        
+         # --- Right Pane: Content View ---
+        content_frame = tk.Frame(self.paned_window, bg="#181818")
+        content_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        self.paned_window.add(content_frame, weight=1) # Add to paned window
+
+        self.lbl_content_title = tk.Label(
+            content_frame,
+            text="Select a mention",
+            fg="#FFFFFF",
+            bg="#181818",
+            font=("Segoe UI", 11, "bold"),
+            anchor="w",
+        )
+        self.lbl_content_title.pack(fill=tk.X, padx=8, pady=(8, 0))
+
+        self.lbl_content_emotion = tk.Label(
+            content_frame,
+            text="",
+            fg="#66A0FF",
+            bg="#181818",
+            font=("Segoe UI", 8),
+            anchor="w",
+        )
+        self.lbl_content_emotion.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        self.txt_content = tk.Text(
+            content_frame,
+            bg="#111111",
+            fg="#FFFFFF",
+            font=("Segoe UI", self.font_size),
+            wrap=tk.WORD,
+            state=tk.NORMAL, # Start as normal for copy/paste
+            borderwidth=0,
+            highlightthickness=0,
+            padx=5,
+            pady=5,
+        )
+        self.txt_content.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        # Block keyboard input, but allow selection and copy
+        self.txt_content.bind("<Key>", lambda e: "break")
+
         # Initialize mentions storage
         self.mentions_by_id = {}
 
@@ -379,6 +426,11 @@ class BoardViewer(tk.Tk):
         except:
             pass
         
+        # S: Update content panel fonts
+        if getattr(self, "lbl_content_title", None):
+            self.lbl_content_title.config(font=("Segoe UI", self.font_size + 2, "bold"))
+            self.lbl_content_emotion.config(font=("Segoe UI", self.font_size - 1))
+            self.txt_content.config(font=("Segoe UI", self.font_size))
         # 컬럼 너비도 다시 조정 (폰트 크기 변경으로 인한 텍스트 너비 변화 반영)
         self.after_idle(self._adjust_column_width_delayed)
         # 열려있는 항목들의 내용도 다시 렌더링 (줄바꿈 재계산)
@@ -396,151 +448,151 @@ class BoardViewer(tk.Tk):
             total_margin = scrollbar_width + padding + margin + safe_margin
             self.tree.column("#0", width=max(200, tree_width - total_margin))
 
-    def _get_item_depth(self, item: str) -> int:
-        depth = 0
-        parent = self.tree.parent(item)
-        while parent:
-            depth += 1
-            parent = self.tree.parent(parent)
-        return depth
+    # def _get_item_depth(self, item: str) -> int:
+    #     depth = 0
+    #     parent = self.tree.parent(item)
+    #     while parent:
+    #         depth += 1
+    #         parent = self.tree.parent(parent)
+    #     return depth
 
-    def _refresh_open_items(self):
-        """열려있는 모든 항목의 내용을 다시 렌더링 (폰트 크기 변경 시)"""
-        def refresh_recursive(item):
-            """재귀적으로 모든 열려있는 항목 찾기"""
-            if not item:
-                return
+    # def _refresh_open_items(self):
+    #     """열려있는 모든 항목의 내용을 다시 렌더링 (폰트 크기 변경 시)"""
+    #     def refresh_recursive(item):
+    #         """재귀적으로 모든 열려있는 항목 찾기"""
+    #         if not item:
+    #             return
             
-            # 현재 항목이 열려있고 내용이 표시되어 있는지 확인
-            if self.tree.item(item, "open"):
-                values = self.tree.item(item, "values")
-                if values and values[0] != "__dummy__" and values[0] != "__content__":
-                    # 내용 항목들 찾기
-                    children = self.tree.get_children(item)
-                    has_content = False
-                    for child in children:
-                        child_values = self.tree.item(child, "values")
-                        if child_values and child_values[0] == "__content__":
-                            has_content = True
-                            break
+    #         # 현재 항목이 열려있고 내용이 표시되어 있는지 확인
+    #         if self.tree.item(item, "open"):
+    #             values = self.tree.item(item, "values")
+    #             if values and values[0] != "__dummy__" and values[0] != "__content__":
+    #                 # 내용 항목들 찾기
+    #                 children = self.tree.get_children(item)
+    #                 has_content = False
+    #                 for child in children:
+    #                     child_values = self.tree.item(child, "values")
+    #                     if child_values and child_values[0] == "__content__":
+    #                         has_content = True
+    #                         break
                     
-                    # 내용이 있으면 삭제하고 다시 렌더링
-                    if has_content:
-                        # 내용 항목들 삭제
-                        for child in list(children):
-                            child_values = self.tree.item(child, "values")
-                            if child_values and child_values[0] == "__content__":
-                                self.tree.delete(child)
-                            elif child_values and child_values[0] == "__dummy__":
-                                self.tree.delete(child)
+    #                 # 내용이 있으면 삭제하고 다시 렌더링
+    #                 if has_content:
+    #                     # 내용 항목들 삭제
+    #                     for child in list(children):
+    #                         child_values = self.tree.item(child, "values")
+    #                         if child_values and child_values[0] == "__content__":
+    #                             self.tree.delete(child)
+    #                         elif child_values and child_values[0] == "__dummy__":
+    #                             self.tree.delete(child)
                         
-                        # 다시 렌더링
-                        mention_id = values[0]
-                        mention = self.mentions_by_id.get(mention_id)
-                        if mention:
-                            self._render_mention_content(item, mention)
+    #                     # 다시 렌더링
+    #                     mention_id = values[0]
+    #                     mention = self.mentions_by_id.get(mention_id)
+    #                     if mention:
+    #                         self._render_mention_content(item, mention)
             
-            # 자식 항목들도 재귀적으로 확인
-            for child in self.tree.get_children(item):
-                refresh_recursive(child)
+    #         # 자식 항목들도 재귀적으로 확인
+    #         for child in self.tree.get_children(item):
+    #             refresh_recursive(child)
         
-        # 루트 항목들부터 시작
-        for root_item in self.tree.get_children():
-            refresh_recursive(root_item)
+    #     # 루트 항목들부터 시작
+    #     for root_item in self.tree.get_children():
+    #         refresh_recursive(root_item)
     
-    def _render_mention_content(self, item, mention):
-        """mention 내용을 트리 항목에 렌더링"""
-        # 전체 내용 구성
-        ts = parse_ts_safe(mention.get("ts"))
-        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
-        agent = mention.get("agent", "?")
-        title = mention.get("title", "")
-        text = mention.get("text", "")
-        emo = mention.get("emotion", {})
-        # 트리뷰 실제 컬럼 픽셀 너비 기준 가용 픽셀 계산
-        try:
-            col_width_px = int(self.tree.column("#0", option="width"))
-        except Exception:
-            col_width_px = self.tree.winfo_width()
-        depth = self._get_item_depth(item) + 1  # content는 한 단계 더 들어감
-        indent_base = getattr(self, "tree_indent_px", 25)
-        indent_px = indent_base * depth
-        # 내부 패딩 + 안전 마진
-        padding_px = max(20, int(self.font_size * 2.0))
-        safe_px = max(10, int(self.font_size * 0.5))
-        available_px = max(50, col_width_px - indent_px - padding_px - safe_px)
-        # 폰트 객체
-        content_font = tkfont.Font(family="Segoe UI", size=self.font_size)
-        header_font = tkfont.Font(family="Segoe UI", size=self.font_size, weight="bold")
+    # def _render_mention_content(self, item, mention):
+    #     """mention 내용을 트리 항목에 렌더링"""
+    #     # 전체 내용 구성
+    #     ts = parse_ts_safe(mention.get("ts"))
+    #     ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+    #     agent = mention.get("agent", "?")
+    #     title = mention.get("title", "")
+    #     text = mention.get("text", "")
+    #     emo = mention.get("emotion", {})
+    #     # 트리뷰 실제 컬럼 픽셀 너비 기준 가용 픽셀 계산
+    #     try:
+    #         col_width_px = int(self.tree.column("#0", option="width"))
+    #     except Exception:
+    #         col_width_px = self.tree.winfo_width()
+    #     depth = self._get_item_depth(item) + 1  # content는 한 단계 더 들어감
+    #     indent_base = getattr(self, "tree_indent_px", 25)
+    #     indent_px = indent_base * depth
+    #     # 내부 패딩 + 안전 마진
+    #     padding_px = max(20, int(self.font_size * 2.0))
+    #     safe_px = max(10, int(self.font_size * 0.5))
+    #     available_px = max(50, col_width_px - indent_px - padding_px - safe_px)
+    #     # 폰트 객체
+    #     content_font = tkfont.Font(family="Segoe UI", size=self.font_size)
+    #     header_font = tkfont.Font(family="Segoe UI", size=self.font_size, weight="bold")
         
-        # 내용을 여러 줄로 나누어 표시
-        content_lines = []
+    #     # 내용을 여러 줄로 나누어 표시
+    #     content_lines = []
         
-        # Agent 정보 (픽셀 기반 줄바꿈)
-        agent_lines = wrap_text_pixels(f"Agent: {agent}", available_px, header_font)
-        content_lines.extend(agent_lines)
+    #     # Agent 정보 (픽셀 기반 줄바꿈)
+    #     agent_lines = wrap_text_pixels(f"Agent: {agent}", available_px, header_font)
+    #     content_lines.extend(agent_lines)
         
-        # Time 정보
-        time_lines = wrap_text_pixels(f"Time: {ts_str}", available_px, content_font)
-        content_lines.extend(time_lines)
+    #     # Time 정보
+    #     time_lines = wrap_text_pixels(f"Time: {ts_str}", available_px, content_font)
+    #     content_lines.extend(time_lines)
         
-        # Title 정보 (Content와 중복되지 않도록 간결한 제목만 표시)
-        display_title = (title or "").strip()
-        if text:
-            # 제목에 본문이 포함되어 있으면 제거
-            if display_title.endswith(text):
-                display_title = display_title[: -len(text)].rstrip()
-            elif text in display_title:
-                display_title = display_title.replace(text, "").strip()
-        # 콜론 구분자가 있으면 앞부분만 사용
-        if ":" in display_title:
-            display_title = display_title.split(":", 1)[0].strip()
-        # 최종 Title 라인 생성
-        title_lines = wrap_text_pixels(f"Title: {display_title}", available_px, content_font)
-        content_lines.extend(title_lines)
+    #     # Title 정보 (Content와 중복되지 않도록 간결한 제목만 표시)
+    #     display_title = (title or "").strip()
+    #     if text:
+    #         # 제목에 본문이 포함되어 있으면 제거
+    #         if display_title.endswith(text):
+    #             display_title = display_title[: -len(text)].rstrip()
+    #         elif text in display_title:
+    #             display_title = display_title.replace(text, "").strip()
+    #     # 콜론 구분자가 있으면 앞부분만 사용
+    #     if ":" in display_title:
+    #         display_title = display_title.split(":", 1)[0].strip()
+    #     # 최종 Title 라인 생성
+    #     title_lines = wrap_text_pixels(f"Title: {display_title}", available_px, content_font)
+    #     content_lines.extend(title_lines)
 
-        content_lines.append("")
-        content_lines.append("Emotion:")
-        content_lines.append(f"  Valence: {emo.get('valence', 0.0):.2f}")
-        content_lines.append(f"  Arousal: {emo.get('arousal', 0.0):.2f}")
-        content_lines.append(f"  Curiosity: {emo.get('curiosity', 0.0):.2f}")
-        content_lines.append(f"  Anxiety: {emo.get('anxiety', 0.0):.2f}")
-        content_lines.append(f"  Trust: {emo.get('trust_to_user', 0.0):.2f}")
-        content_lines.append("")
-        content_lines.append("Content:")
+    #     content_lines.append("")
+    #     content_lines.append("Emotion:")
+    #     content_lines.append(f"  Valence: {emo.get('valence', 0.0):.2f}")
+    #     content_lines.append(f"  Arousal: {emo.get('arousal', 0.0):.2f}")
+    #     content_lines.append(f"  Curiosity: {emo.get('curiosity', 0.0):.2f}")
+    #     content_lines.append(f"  Anxiety: {emo.get('anxiety', 0.0):.2f}")
+    #     content_lines.append(f"  Trust: {emo.get('trust_to_user', 0.0):.2f}")
+    #     content_lines.append("")
+    #     content_lines.append("Content:")
         
-        # 텍스트를 여러 줄로 나누어 표시 (픽셀 기반 줄바꿈)
-        for original_line in text.split('\n'):
-            if original_line.strip():
-                wrapped_lines = wrap_text_pixels(original_line, available_px, content_font, prefix_text="  ")
-                content_lines.extend(wrapped_lines)
-            else:
-                content_lines.append("")
+    #     # 텍스트를 여러 줄로 나누어 표시 (픽셀 기반 줄바꿈)
+    #     for original_line in text.split('\n'):
+    #         if original_line.strip():
+    #             wrapped_lines = wrap_text_pixels(original_line, available_px, content_font, prefix_text="  ")
+    #             content_lines.extend(wrapped_lines)
+    #         else:
+    #             content_lines.append("")
         
-        if mention.get("parent_id"):
-            content_lines.append("")
-            reply_lines = wrap_text_pixels(f"[Reply to: {mention.get('parent_id')}]", available_px, content_font)
-            content_lines.extend(reply_lines)
+    #     if mention.get("parent_id"):
+    #         content_lines.append("")
+    #         reply_lines = wrap_text_pixels(f"[Reply to: {mention.get('parent_id')}]", available_px, content_font)
+    #         content_lines.extend(reply_lines)
         
-        # 각 줄을 자식 항목으로 추가 (판넬 배경 효과를 위해)
-        for i, line in enumerate(content_lines):
-            # 첫 번째 줄은 헤더 태그, 나머지는 content 태그
-            tag = "header" if i == 0 else "content"
-            self.tree.insert(
-                item,
-                "end",
-                text=line,
-                values=("__content__",),
-                tags=(tag,)
-            )
-        # 다음 항목과의 간격을 위해 공백 라인 추가
-        self.tree.insert(
-            item,
-            "end",
-            text="",
-            values=("__content__",),
-            tags=("spacer",)
-        )
+    #     # 각 줄을 자식 항목으로 추가 (판넬 배경 효과를 위해)
+    #     for i, line in enumerate(content_lines):
+    #         # 첫 번째 줄은 헤더 태그, 나머지는 content 태그
+    #         tag = "header" if i == 0 else "content"
+    #         self.tree.insert(
+    #             item,
+    #             "end",
+    #             text=line,
+    #             values=("__content__",),
+    #             tags=(tag,)
+    #         )
+    #     # 다음 항목과의 간격을 위해 공백 라인 추가
+    #     self.tree.insert(
+    #         item,
+    #         "end",
+    #         text="",
+    #         values=("__content__",),
+    #         tags=("spacer",)
+    #     )
 
     def _poll(self):
         """Legacy entry - now starts async poll."""
@@ -671,10 +723,10 @@ class BoardViewer(tk.Tk):
                     # push in reverse order so first child processed next
                     for ch in childs[::-1]:
                         work_stack.append((ch, item_id))
-                else:
-                    # ensure fold icon by dummy child
-                    dummy_id = self.tree.insert(item_id, "end", text="", values=("__dummy__",))
-                    self.tree.item(dummy_id, open=False)
+                # else:
+                #     # ensure fold icon by dummy child
+                #     dummy_id = self.tree.insert(item_id, "end", text="", values=("__dummy__",))
+                #     self.tree.item(dummy_id, open=False)
                 inserted += 1
             if work_stack and token == getattr(self, "_render_token", None):
                 # schedule next chunk
@@ -714,67 +766,142 @@ class BoardViewer(tk.Tk):
         )
         return item_id
 
-    def on_tree_open(self, event):
-        """트리 항목을 열 때 내용을 자식 항목으로 표시"""
-        # 열린 항목 찾기
-        item = event.widget.focus()
+    # def on_tree_open(self, event):
+    #     """트리 항목을 열 때 내용을 자식 항목으로 표시"""
+    #     # 열린 항목 찾기
+    #     item = event.widget.focus()
+    #     if not item:
+    #         return
+        
+    #     values = self.tree.item(item, "values")
+    #     if not values:
+    #         return
+        
+    #     mention_id = values[0]
+        
+    #     # 더미 항목은 무시
+    #     if mention_id == "__dummy__":
+    #         return
+        
+    #     mention = self.mentions_by_id.get(mention_id)
+    #     if not mention:
+    #         return
+        
+    #     # 이미 내용이 표시되었는지 확인 (자식 항목 중 "__content__" 태그가 있는지 확인)
+    #     children = self.tree.get_children(item)
+    #     has_content = False
+    #     dummy_child = None
+    #     for child in children:
+    #         child_values = self.tree.item(child, "values")
+    #         if child_values:
+    #             if child_values[0] == "__content__":
+    #                 has_content = True
+    #             elif child_values[0] == "__dummy__":
+    #                 dummy_child = child
+        
+    #     if has_content:
+    #         return  # 이미 내용이 표시됨
+        
+    #     # 더미 항목이 있으면 제거
+    #     if dummy_child:
+    #         self.tree.delete(dummy_child)
+        
+    #     # 내용 렌더링 (공통 함수 사용)
+    #     self._render_mention_content(item, mention)
+
+    # def on_tree_close(self, event):
+    #     """트리 항목을 닫을 때 접두사 복원 및 내용 정리"""
+    #     item = event.widget.focus()
+    #     if not item:
+    #         return
+    #     # 내용(children with __content__) 제거, 없으면 유지
+    #     children = self.tree.get_children(item)
+    #     has_real_child = False
+    #     for ch in list(children):
+    #         vals = self.tree.item(ch, "values")
+    #         if vals and vals[0] == "__content__":
+    #             self.tree.delete(ch)
+    #         else:
+    #             has_real_child = True
+    #     # 최소 더미 자식 보장
+    #     if not has_real_child:
+    #         self.tree.insert(item, "end", text="", values=("__dummy__",))
+    # S: --- ADDED FUNCTIONS ---
+    def on_tree_select(self, event=None):
+        """Handle <<TreeviewSelect>> event."""
+        item = self.tree.focus()
         if not item:
+            self._render_content_to_panel(None) # Clear panel
             return
         
         values = self.tree.item(item, "values")
-        if not values:
+        if not values or values[0] == "__dummy__":
+            self._render_content_to_panel(None) # Clear panel
             return
         
         mention_id = values[0]
-        
-        # 더미 항목은 무시
-        if mention_id == "__dummy__":
-            return
-        
         mention = self.mentions_by_id.get(mention_id)
+        self._render_content_to_panel(mention)
+
+    def _render_content_to_panel(self, mention):
+        """Render mention details to the right-hand Text widget."""
+        
+        # S: Clear content text widget (even if disabled)
+        self.txt_content.config(state=tk.NORMAL)
+        self.txt_content.delete("1.0", tk.END)
+
         if not mention:
+            self.lbl_content_title.config(text="Select a mention")
+            self.lbl_content_emotion.config(text="")
+            # S: txt_content is already cleared
             return
-        
-        # 이미 내용이 표시되었는지 확인 (자식 항목 중 "__content__" 태그가 있는지 확인)
-        children = self.tree.get_children(item)
-        has_content = False
-        dummy_child = None
-        for child in children:
-            child_values = self.tree.item(child, "values")
-            if child_values:
-                if child_values[0] == "__content__":
-                    has_content = True
-                elif child_values[0] == "__dummy__":
-                    dummy_child = child
-        
-        if has_content:
-            return  # 이미 내용이 표시됨
-        
-        # 더미 항목이 있으면 제거
-        if dummy_child:
-            self.tree.delete(dummy_child)
-        
-        # 내용 렌더링 (공통 함수 사용)
-        self._render_mention_content(item, mention)
 
-    def on_tree_close(self, event):
-        """트리 항목을 닫을 때 접두사 복원 및 내용 정리"""
-        item = event.widget.focus()
-        if not item:
-            return
-        # 내용(children with __content__) 제거, 없으면 유지
-        children = self.tree.get_children(item)
-        has_real_child = False
-        for ch in list(children):
-            vals = self.tree.item(ch, "values")
-            if vals and vals[0] == "__content__":
-                self.tree.delete(ch)
-            else:
-                has_real_child = True
-        # 최소 더미 자식 보장
-        if not has_real_child:
-            self.tree.insert(item, "end", text="", values=("__dummy__",))
+        # Extract data
+        ts = parse_ts_safe(mention.get("ts"))
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+        agent = mention.get("agent", "?")
+        title = mention.get("title", "")
+        text = mention.get("text", "")
+        emo = mention.get("emotion", {})
 
+        # 1. Set Title
+        # S: Clean up title if it contains the text
+        display_title = (title or "").strip()
+        if text:
+            if display_title.endswith(text):
+                display_title = display_title[: -len(text)].rstrip(' :')
+            elif text in display_title:
+                display_title = display_title.replace(text, "").strip(' :')
+        if not display_title:
+            display_title = "Mention"
+            
+        self.lbl_content_title.config(text=f"[{agent}] {display_title}")
+
+        # 2. Set Emotion
+        emo_str = (
+            f"Valence: {emo.get('valence', 0.0):.2f} | "
+            f"Arousal: {emo.get('arousal', 0.0):.2f} | "
+            f"Curiosity: {emo.get('curiosity', 0.0):.2f} | "
+            f"Anxiety: {emo.get('anxiety', 0.0):.2f} | "
+            f"Trust: {emo.get('trust_to_user', 0.0):.2f}"
+        )
+        self.lbl_content_emotion.config(text=emo_str)
+
+        # 3. Set Content in Text widget
+        self.txt_content.tag_config("header", font=("Segoe UI", self.font_size, "bold"), foreground="#CCCCCC")
+        self.txt_content.tag_config("body", font=("Segoe UI", self.font_size), foreground="#FFFFFF")
+        self.txt_content.tag_config("meta", font=("Segoe UI", self.font_size - 1), foreground="#888888")
+
+        self.txt_content.insert("1.0", f"Time: {ts_str}\n", "header")
+        self.txt_content.insert(tk.END, "Content:\n", "header")
+        self.txt_content.insert(tk.END, f"{text}\n\n", "body")
+        
+        if mention.get("parent_id"):
+            self.txt_content.insert(tk.END, f"[Reply to: {mention.get('parent_id')}]\n", "meta")
+        
+        self.txt_content.insert(tk.END, f"[Mention ID: {mention.get('id')}]\n", "meta")
+
+    # S: --- END ADDED FUNCTIONS ---
 
 if __name__ == "__main__":
     app = BoardViewer()
