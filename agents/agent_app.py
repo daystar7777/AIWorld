@@ -1612,11 +1612,13 @@ class AiMentionApp(tk.Tk):
             fg="#FFFFFF",
             font=("Segoe UI", 9),
             wrap=tk.WORD,
-            state=tk.DISABLED,
+            # state=tk.DISABLED,
+            state=tk.NORMAL,
             borderwidth=0,
             highlightthickness=0,
         )
         self.txt_messages.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        self.txt_messages.bind("<Key>", lambda e: "break")
 
         input_frame = tk.Frame(right, bg="#181818")
         input_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -2004,8 +2006,8 @@ class AiMentionApp(tk.Tk):
     def on_select_mention(self, event):
         sel = self.list_mentions.curselection()
         if not sel:
-            self.selected_thread = None
-            self._render_thread()
+            # self.selected_thread = None            
+            # self._render_thread()
             return
         self.selected_thread = self.mentions[sel[0]]
         self._render_thread()
@@ -2068,13 +2070,13 @@ class AiMentionApp(tk.Tk):
     # ---------- rendering ----------
 
     def _render_thread(self):
-        self.txt_messages.config(state=tk.NORMAL)
+        # self.txt_messages.config(state=tk.NORMAL)
         self.txt_messages.delete("1.0", tk.END)
 
         if not self.selected_thread:
             self.lbl_thread_title.config(text="Select a local mention")
             self.lbl_thread_emotion.config(text="")
-            self.txt_messages.config(state=tk.DISABLED)
+            # self.txt_messages.config(state=tk.DISABLED)
             return
 
         t = self.selected_thread
@@ -2110,7 +2112,7 @@ class AiMentionApp(tk.Tk):
         for r in t.replies:
             append(r)
 
-        self.txt_messages.config(state=tk.DISABLED)
+        # self.txt_messages.config(state=tk.DISABLED)
         self.txt_messages.see(tk.END)
 
     def _render_board(self):
