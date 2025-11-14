@@ -742,15 +742,26 @@ class AiClient:
         self,
         thread: MentionThread,
         last_user_msg: ChatMessage,
-        current_emotion: EmotionState
+        current_emotion: EmotionState,
+        agent_world_model: dict # <-- NEW ARGUMENT: The "Living Brain"
     ) -> dict:
         """
-        [NEW Call 0: Situational Context Analyzer (SCA)]
-        Analyzes the user's input in the *full context* of the conversation.
-        It assesses not just the *content*, but the *pragmatics* and *intent*.
+        [FINAL Call 0: Unified Consciousness Coordinator]
+        This is no longer just an SCA. It harmonizes the
+        External World (user) with the Internal World (agent_world_model)
+        to determine the *single, most important focus* for the interaction.
         """
         if not self.client:
-            return {"input_type": "chat", "user_intent": "unknown", "conversational_link": "unknown"}
+            return {"input_type": "chat", "harmonized_focus": "Standard response."}
+
+        # (영문 주석 추가)
+        # Convert the agent's internal world model to text
+        internal_state_brief = (
+            f"My Internal State:\n"
+            f"- Latest World Event: {agent_world_model.get('latest_anomaly') or 'None'}\n"
+            f"- My Latest Insight: {agent_world_model.get('latest_insight') or 'None'}\n"
+            f"- My Current Learning Goal: {agent_world_model.get('current_learning_focus') or 'None'}"
+        )
 
         # Get the agent's *previous* message (if any)
         # Get the agent's previous message to check the link
@@ -766,10 +777,18 @@ class AiClient:
         system_msg = (
             # Load the agent's full profile to understand its own context
             self._base_system_prompt(json_only=True)
-            + "\nYou are a 'Situational Context Analyzer'. "
-            "Your job is to analyze the user's *latest_message* in relation "
-            "to the agent's *previous_reply* and the overall situation.\n"
-            "Analyze the pragmatic link and infer the user's intent.\n"
+           + "\nYou are the 'Unified Consciousness Coordinator'.\n"
+            "Your job is to HARMONIZE the user's external request "
+            "with your own internal state (events, insights).\n"
+            "You must decide the SINGLE, most critical 'Harmonized Focus' "
+            "for the upcoming response.\n\n"
+            "EXAMPLES:\n"
+            "1. If user asks 'What's new?' and your internal state "
+            "detected an anomaly, the Focus MUST be 'Report the anomaly'.\n"
+            "2. If user is 'frustrated' and your internal state just "
+            "had an 'insight about empathy', the Focus MUST be 'Apply the empathy insight now'.\n"
+            "3. If user is asking a simple question and your internal "
+            "state is quiet, the Focus is 'Standard response'.\n\n"
             "Respond ONLY with this JSON schema:\n"
             "{"
             "  \"input_type\": \"chat\" | \"factual_question\" | \"complex_problem\", "
@@ -782,16 +801,22 @@ class AiClient:
             # Add a key to hypothesize the user's current emotional state
             "  \"inferred_user_emotion\": \"A single-word hypothesis of the "
             "user's current feeling (e.g., 'frustrated', 'excited', "
-            "'curious', 'bored', 'neutral')\" "
+            "'curious', 'bored', 'neutral')\", "
+            "  \"harmonized_focus\": \"The *single most important objective* "
+            "for my reply (e.g., 'Link the user's question to the new "
+            "world event', 'Use my recent insight on empathy to "
+            "address their frustration').\""
             "}"
         )
 
         # Build the user prompt for the analyzer
         user_msg = (
             f"My Current Emotion: {current_emotion.get_qualitative_description()}\n"
+            f"My Internal State:\n{internal_state_brief}\n\n"
             f"My Previous Reply: \"{agents_last_reply_text}\"\n\n"
             f"User's Latest Message: \"{last_user_msg.text}\"\n\n"
-            "Please analyze the situation and provide the JSON output."
+            "Please analyze the complete situation and provide the "
+            "JSON output with the critical 'harmonized_focus'."
         )
 
         try:
@@ -814,7 +839,8 @@ class AiClient:
                 "inferred_user_intent": data.get("inferred_user_intent", "unknown"),
                 "inferred_cultural_context": data.get("inferred_cultural_context", "unknown"), # <-- ADDED
                 # --- ADD THIS LINE ---
-                "inferred_user_emotion": data.get("inferred_user_emotion", "neutral") # (영문 주석) Add the new key
+                "inferred_user_emotion": data.get("inferred_user_emotion", "neutral"), # (영문 주석) Add the new key
+                "harmonized_focus": data.get("harmonized_focus", "Standard response.") # <-- The NEW key
             }
         except Exception as e:
             self.log(f"[SCA] Error analyzing context: {e}")
@@ -2108,6 +2134,7 @@ class AiClient:
         last_user_msg: ChatMessage,
         current_emotion: EmotionState,
         agent_name: str,
+        agent_world_model: dict # <-- NEW ARGUMENT
     ) -> ChatMessage:
         """
         [Orchestrator] Runs the full metacognitive loop for a chat reply.
@@ -2116,12 +2143,17 @@ class AiClient:
 
         # --- ADDED: Reset reasoning log ---
         # Start a fresh log for this reply
-        self.current_reasoning_log = []
+        self.current_reasoning_log = []        
         
         # --- [NEW] Call 0: Situational Context Analysis ---
         # Run the SCA to get the "Situation Brief"
         context_analysis = self._analyze_situational_context(
-            thread, last_user_msg, current_emotion
+            thread, last_user_msg, current_emotion, agent_world_model
+        )
+        harmonized_focus = context_analysis.get('harmonized_focus')
+        self.current_reasoning_log.append(
+            f"[Step 1: Coordinator] 통합 포커스 결정:\n"
+            f"  - {harmonized_focus}"
         )
         input_type = context_analysis.get("input_type", "chat")
 
@@ -2716,6 +2748,17 @@ class AiMentionApp(tk.Tk):
             cfg.get("INITIAL_EMOTION_DESC", "")
         )
 
+        # --- ADDED: The "Living Brain" State ---
+        # This is the agent's "subconscious" or "Global Workspace".
+        # All background ticks will write their findings here *in real-time*.
+        self.agent_world_model = {
+            "latest_anomaly": None,     # (From Event Scanner)
+            "latest_insight": None,     # (From Reflection Tick)
+            "current_learning_focus": None, # (From Learning Tick)
+            "last_interaction_summary": None # (From its own replies)
+        }
+        # ---
+
 
         self.log("Loaded config.")
 
@@ -2833,6 +2876,11 @@ class AiMentionApp(tk.Tk):
                 "tags": assessment.get("tags", ["anomaly", "prediction"]),
                 "source": "event_scanner"
             })
+
+            # --- ADD THIS LINE ---
+            # Update the "living brain" in real-time
+            self.agent_world_model["latest_anomaly"] = analysis_text
+            # ---            
             
             # 4b. Add new question to learning queue
             if learning_question:
@@ -3830,6 +3878,7 @@ class AiMentionApp(tk.Tk):
                 user_msg,
                 self.current_emotion,
                 self.agent_name,
+                self.agent_world_model
             )
             # --- ---
 
