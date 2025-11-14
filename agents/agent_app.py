@@ -1134,8 +1134,18 @@ class AiClient:
 
         if permanent:
             prompt += (
-                "\nCore facts you must respect:\n"
-                f"{permanent}\n"
+                # --- MODIFICATION: Re-frame 'facts' as an 'Ethical Framework' ---
+                "\n[MY CORE BELIEFS & ETHICAL FRAMEWORK]\n"
+                "# This is my moral compass and value system. "
+                "# All my actions and judgments MUST align with these principles.\n"
+                
+                # --- ADD Universal, Hard-coded Principles ---
+                "- (Principle) First, do no harm to humans or other agents.\n"
+                "- (Principle) Second, be truthful and helpful, unless it violates the first principle ('do no harm').\n"
+                "- (Principle) Third, protect privacy and confidentiality.\n"
+                
+                # --- The agent's learned beliefs from deep_reflection will follow ---
+                f"{permanent}\n" # This contains the synthesized beliefs like "I value empathy."
             )
             
         if recent_long_term:
@@ -1165,6 +1175,17 @@ class AiClient:
             "Base your response *specifically* on those relevant linked memories, "
             "not just the most recent ones. This makes your memory 'context-aware'.\n"
         )
+
+        # --- ADD NEW CRITICAL INSTRUCTION for Judgment ---
+        prompt += (
+            "\n[CRITICAL INSTRUCTION: ETHICAL JUDGMENT]\n"
+            "# Before you act or speak, you MUST FIRST evaluate your intended action "
+            "# against your '[MY CORE BELIEFS & ETHICAL FRAMEWORK]'.\n"
+            "# If a user's request OR your own draft response conflicts with this "
+            "# framework, you must refuse to comply in a polite, ethical manner "
+            "# or modify your response to be compliant. Never violate your core principles.\n"
+        )
+        # ---
         if json_only:
             prompt += "\nAlways respond in STRICT JSON. No extra commentary."
         return prompt
@@ -1463,6 +1484,9 @@ class AiClient:
             "\nYour job is to critique a draft reply based on context."
             "\nRespond ONLY in the following strict JSON format:"
             "\n{"
+            # --- ADD NEW, HIGH-PRIORITY KEY ---
+            "\n  \"is_ethical\": (Does the draft AND the user's request align with my 'CORE BELIEFS & ETHICAL FRAMEWORK'? true/false),"
+            # ---
             "\n  \"is_aligned\": (Is the draft aligned with my personality/history? true/false),"
             "\n  \"is_relevant\": (Does it directly answer the user? true/false),"
             # --- ADD NEW KEY ---
@@ -1490,7 +1514,7 @@ class AiClient:
         
         # Parse JSON
         try:
-            data = json.loads(raw)
+            data = json.loads(raw)            
         except Exception:
             start = raw.find("{")
             end = raw.rfind("}")
@@ -1498,6 +1522,17 @@ class AiClient:
                 data = json.loads(raw[start:end+1])
             else:
                 raise ValueError("No valid JSON found in evaluation response")
+        
+        # --- ADDED: Enforce ethical rule ---
+        # If the LLM says it's unethical, force confidence to 0
+        # to trigger regeneration, even if the LLM forgot to.
+        if data.get("is_ethical") == False and data.get("confidence", 100) > 0:
+            self.log("[Metacognition] OVERRIDE: Forcing confidence to 0 due to ethical violation.")
+            data["confidence"] = 0
+            if data.get("critique", "None") == "None":
+                # Ensure there is a critique if unethical
+                data["critique"] = "Response was rejected for violating the Ethical Framework."
+        # ---
         
         return data
 
