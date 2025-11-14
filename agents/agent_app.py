@@ -525,6 +525,118 @@ class AiClient:
             self.client = None
             self.log("[AiClient] Running in offline/dummy mode (no API key or openai missing).")
 
+    def _triage_user_input(self, user_input: str) -> str:
+        """
+        [Call 0: Triage] Classifies the user's input to decide which
+        response loop to use.
+        """
+        if not self.client:
+            return "chat" # Default for offline mode
+
+        system_msg = (
+            "You are an input classifier. Classify the user's intent. "
+            "Respond ONLY with a single JSON key: "
+            "{\"input_type\": \"chat\" | \"factual_question\" | \"complex_problem\"}\n"
+            " - 'chat': Simple talk, greetings, emotional expressions.\n"
+            " - 'factual_question': A question with a clear, objective answer.\n"
+            " - 'complex_problem': A request for advice, brainstorming, "
+            "   creative solutions, or analyzing a nuanced situation."
+        )
+        
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name, # A fast model is fine
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_input}
+                ],
+                temperature=0.0
+            )
+            raw = (res.choices[0].message.content or "").strip()
+            data = json.loads(raw)
+            input_type = data.get("input_type", "chat")
+            self.log(f"[Triage] Input classified as: {input_type}")
+            return input_type
+        except Exception as e:
+            self.log(f"[Triage] Error classifying input: {e}")
+            return "chat" # Default to simple chat on error
+        
+    # --- ADD THIS NEW FUNCTION (The "Council of Experts" Loop) ---
+    def _generate_creative_draft(
+        self, 
+        user_msg: ChatMessage, 
+        current_emotion: EmotionState, 
+        agent_name: str
+    ) -> ChatMessage:
+        """
+        [Call 1 - Creative] Generates a creative draft by synthesizing
+        multiple perspectives.
+        """
+        self.log("[Metacognition] Activating Creative Synthesis Loop...")
+        
+        # --- Call 1a: Perspective Generation (The "Council") ---
+        # (Note: This could be combined, but 2 calls are cleaner)
+        council_system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nYou are a 'Council of Experts'. The user has a problem. "
+            "Your task is to generate 3-5 distinct, insightful perspectives "
+            "to help solve it.\n"
+            "Include at least: a Pragmatist, an Ethicist, and a 'What if' Innovator.\n"
+            "Respond ONLY in this JSON format: "
+            "{\"perspectives\": [\"Perspective 1 (e.g., Pragmatist): ...\", \"Perspective 2 (e.g., Ethicist): ...\"]}"
+        )
+        
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name, # Use smart model
+                messages=[
+                    {"role": "system", "content": council_system_msg},
+                    {"role": "user", "content": user_msg.text}
+                ],
+                temperature=0.7
+            )
+            raw_perspectives = (res.choices[0].message.content or "").strip()
+            perspectives_data = json.loads(raw_perspectives)
+            perspectives = perspectives_data.get("perspectives", [])
+            if not perspectives:
+                raise ValueError("No perspectives generated.")
+            self.log(f"[Metacognition] Call 1a (Council) generated {len(perspectives)} perspectives.")
+        except Exception as e:
+            self.log(f"[Metacognition] Call 1a (Council) FAILED: {e}. Falling back to simple draft.")
+            # Fallback: if creative loop fails, just use the simple draft
+            return self._generate_draft_reply(None, user_msg, current_emotion, agent_name, is_fallback=True)
+
+        # --- Call 1b: Creative Synthesis (The "Synthesizer") ---
+        synthesis_system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nYou are a 'Creative Synthesizer'. You will be given a "
+            "user's problem and several expert perspectives.\n"
+            "Your job is to **integrate these conflicting viewpoints** into "
+            "a single, novel, and actionable solution. This is your draft reply.\n"
+            "Generate an emotion that reflects this deep, thoughtful process.\n"
+            "Respond ONLY in the standard JSON reply format: "
+            "{\"reply\": \"...\", \"emotion\": {...}}"
+        )
+        
+        synthesis_user_prompt = (
+            f"The User's Problem: \"{user_msg.text}\"\n\n"
+            "The Council of Experts provided these perspectives:\n"
+            + "\n".join(f"- {p}" for p in perspectives)
+            + "\n\n"
+            "Now, please synthesize these views into a single, "
+            "creative, and integrated solution for the user."
+        )
+        
+        # This call is almost identical to _generate_draft_reply
+        # We re-use its logic by calling it directly, but with a different prompt
+        return self._generate_draft_reply(
+            None, 
+            ChatMessage(author="User", text=synthesis_user_prompt, timestamp=user_msg.timestamp, emotion_snapshot=user_msg.emotion_snapshot), # Use the new prompt
+            current_emotion, 
+            agent_name,
+            system_prompt_override=synthesis_system_msg # Override the default prompt
+        )
+
     def available(self) -> bool:
         return self.client is not None
     
@@ -1382,14 +1494,30 @@ class AiClient:
     ) -> ChatMessage:
         """
         [Orchestrator] Runs the full metacognitive loop for a chat reply.
-        1. Generate Draft
-        2. Evaluate Draft
-        3. (If needed) Regenerate Final Reply
+        NOW INCLUDES TRIAGE for creative problem solving.
         """
-        # --- Call 1: Generate Draft ---
-        draft_chat_msg = self._generate_draft_reply(
-            thread, last_user_msg, current_emotion, agent_name
-        )
+        
+        # --- [NEW] Call 0: Triage ---
+        input_type = self._triage_user_input(last_user_msg.text)
+        
+        # --- [NEW] Branching Logic ---
+        if input_type == "complex_problem":
+            # --- Path 1: Creative Loop ---
+            try:
+                draft_chat_msg = self._generate_creative_draft(
+                    last_user_msg, current_emotion, agent_name
+                )
+            except Exception as e:
+                self.log(f"[Metacognition] Creative draft loop failed: {e}")
+                # Fallback to simple draft on catastrophic failure
+                draft_chat_msg = self._generate_draft_reply(
+                    thread, last_user_msg, current_emotion, agent_name, is_fallback=True
+                )
+        else:
+            # --- Path 2: Simple/Factual Loop (Original Path) ---
+            draft_chat_msg = self._generate_draft_reply(
+                thread, last_user_msg, current_emotion, agent_name
+            )
         
         # If draft failed (e.g., offline or API error), return the failure message
         if "(API error" in draft_chat_msg.text or "(offline)" in draft_chat_msg.text:
