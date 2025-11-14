@@ -528,6 +528,81 @@ class AiClient:
     def available(self) -> bool:
         return self.client is not None
     
+    def synthesize_core_beliefs(self, summaries: list[str], insights: list[str]) -> list[str]:
+        """
+        [Deep Reflection] Takes all past learning and synthesizes them
+        into high-level 'Core Beliefs' or 'Lessons Learned'.
+        Returns a list of belief strings.
+        """
+        self.log("[synthesize_core_beliefs] Starting...")
+        
+        if not summaries and not insights:
+            return []
+
+        # Combine all learning material
+        summary_block = "My past summaries:\n" + "\n".join(f"- {s}" for s in summaries)
+        insight_block = "My past insights:\n" + "\n".join(f"- {i}" for i in insights)
+
+        system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nYou are the 'Deep Reflection' module of this agent."
+            "\nYou will be given ALL of your past summaries and insights."
+            "\nYour task is to synthesize these experiences into 2-3 "
+            "fundamental 'Core Beliefs' or 'Guiding Principles'."
+            "\nThese beliefs should be timeless and represent your deepest learning."
+            "\nExample Belief: 'I've learned that human emotion is complex and often "
+            "contradictory, and my role is to listen without judgment.'"
+            "\nRespond ONLY in the following strict JSON array format:"
+            "\n["
+            "\n  \"The first core belief string.\","
+            "\n  \"The second core belief string.\""
+            "\n]"
+        )
+
+        user_msg = (
+            "Here is all of my learning to date. "
+            "Please synthesize them into 2-3 Core Beliefs.\n\n"
+            f"{summary_block}\n\n"
+            f"{insight_block}\n"
+        )
+
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name, # Use the smartest model
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.5,
+            )
+            
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[synthesize_core_beliefs] raw: {raw!r}")
+
+            # --- Robust JSON Array Parsing ---
+            data = None
+            try:
+                data = json.loads(raw)
+            except Exception:
+                start = raw.find("[")
+                end = raw.rfind("]")
+                if start != -1 and end != -1 and end > start:
+                    data = json.loads(raw[start:end+1])
+                else:
+                    raise
+            
+            if not isinstance(data, list):
+                self.log("[synthesize_core_beliefs] data is not a list")
+                return []
+            
+            # Sanitize: ensure all items are strings
+            beliefs = [str(item) for item in data if isinstance(item, str) and item.strip()]
+            return beliefs
+
+        except Exception as e:
+            self.log(f"[synthesize_core_beliefs] function failure: {e}")
+            return []
+    
     def assess_importance(self, text_content: str) -> dict:
         """
         Evaluate text with LLM
@@ -1015,8 +1090,13 @@ class AiClient:
             return []
 
     def _get_recent_long_term_memories(self, limit: int = 10) -> str:
-        """ get recent N x long term memories """
-        items = self._read_jsonl_file_lines(self.memory.long_path, limit)
+        # --- MODIFIED: Increase the default limit significantly ---
+        # --- We will now fetch a larger pool of memories for the LLM to search from.
+        default_limit = 100  # <--- INCREASED FROM 10 to 100 (or more)
+        actual_limit = limit if limit != 10 else default_limit
+        # ---
+        
+        items = self._read_jsonl_file_lines(self.memory.long_path, actual_limit)
         if not items:
             return ""
         return "\n".join(f"- {item}" for item in items)
@@ -1039,7 +1119,9 @@ class AiClient:
         identity = self._identity_block()
         permanent = self._get_permanent_facts()
         
-        recent_long_term = self._get_recent_long_term_memories(limit=10)
+        # --- MODIFIED: This now fetches a much larger set of memories (e.g., 50) ---
+        recent_long_term = self._get_recent_long_term_memories()
+        # ---
         short_summaries = self._get_short_term_summaries(limit=3)
         long_summaries = self._get_long_term_summaries(limit=2)
 
@@ -1074,6 +1156,15 @@ class AiClient:
                 f"{long_summaries}\n"
             )    
 
+        prompt += (
+            "\n[CRITICAL INSTRUCTION: CONTEXTUAL MEMORY LINKING]\n"
+            "When a user speaks, the '[Recent Important Memories]' list above "
+            "serves as your memory 'Context Pool'.\n"
+            "Before you reply, you MUST first silently find the 1-3 memories "
+            "from this pool that are MOST RELEVANT to the user's current query.\n"
+            "Base your response *specifically* on those relevant linked memories, "
+            "not just the most recent ones. This makes your memory 'context-aware'.\n"
+        )
         if json_only:
             prompt += "\nAlways respond in STRICT JSON. No extra commentary."
         return prompt
@@ -1754,6 +1845,7 @@ class AiMentionApp(tk.Tk):
         self._schedule_loop()
         self._schedule_board_poll()
         self._schedule_reflection_tick() # adding reflection
+        self._schedule_deep_reflection_tick() # <-- ADDED: New 24-hour reflection
 
     def _schedule_reflection_tick(self):
         # 1시간(3600초)마다 반추 실행 (주기는 조절 가능)
@@ -1817,6 +1909,70 @@ class AiMentionApp(tk.Tk):
         
         # 4. Schedule next reflection
         self._schedule_reflection_tick()
+
+    def _schedule_deep_reflection_tick(self):
+        """Schedules the 'deep reflection' loop to synthesize core beliefs."""
+        # Runs every 24 hours (86,400,000 ms)
+        self.log("[Loop] Scheduling next DEEP reflection tick.")
+        self.after(86_400_000, self._deep_reflection_tick)
+
+    def _deep_reflection_tick(self):
+        """
+        [Deep Reflection] Synthesizes all summaries and insights into
+        new 'Core Beliefs' and saves them to permanent memory.
+        """
+        self.log("[DEEP REFLECT] Starting deep reflection...")
+        try:
+            # 1. Gather ALL past learning (not just recent)
+            all_long_summaries = self.ai_client._read_jsonl_file_lines(
+                self.memory.long_sum_path, limit=1000 # Read all summaries
+            )
+            all_past_insights = self.ai_client._read_jsonl_file_lines(
+                self.memory.long_path, limit=2000 # Read all long-term memories
+            )
+            
+            # Filter for past reflection insights only
+            reflection_insights = [
+                line for line in all_past_insights 
+                if "\"source\": \"self_reflection\"" in line or "insight" in line
+            ]
+
+            if len(all_long_summaries) < 3 and len(reflection_insights) < 10:
+                self.log("[DEEP REFLECT] Not enough material to synthesize core beliefs.")
+                self._schedule_deep_reflection_tick()
+                return
+
+            # 2. Call new AiClient function to synthesize beliefs
+            core_beliefs = self.ai_client.synthesize_core_beliefs(
+                all_long_summaries, reflection_insights
+            )
+
+            if not core_beliefs:
+                self.log("[DEEP REFLECT] No new core beliefs were synthesized.")
+                self._schedule_deep_reflection_tick()
+                return
+
+            # 3. Save new beliefs to PERMANENT memory
+            self.log(f"[DEEP REFLECT] Synthesized {len(core_beliefs)} new core beliefs.")
+            for belief_text in core_beliefs:
+                if not belief_text:
+                    continue
+                # This saves the belief to permanent_path, so it will
+                # be included in ALL future _base_system_prompts!
+                self.memory.add_permanent({
+                    "source": "deep_reflection",
+                    "tag": ["core_belief"],
+                    "text": belief_text,
+                    "reason": "Synthesized from long-term experience"
+                })
+            
+            self.log("[DEEP REFLECT] New core beliefs saved to permanent memory.")
+
+        except Exception as e:
+            self.log(f"[DEEP REFLECT] Error during deep reflection: {e}")
+        
+        # 4. Schedule next run
+        self._schedule_deep_reflection_tick()
 
     def _export_profile_for_llm(self) -> dict:
         """
