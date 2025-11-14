@@ -262,6 +262,26 @@ class MemoryManager:
             return ""
         return " ".join(text.strip().split())
     
+    # Load and save the timestamp for the last philosophy synthesis
+    def load_agent_state(self) -> dict:
+        """Loads the entire agent state JSON."""
+        if not self.state_path.exists():
+            return {}
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[Memory] Could not load agent state: {e}")
+            return {}
+
+    def save_agent_state(self, state_data: dict):
+        """Saves the entire agent state JSON."""
+        try:
+            with open(self.state_path, "w", encoding="utf-8") as f:
+                json.dump(state_data, f, indent=2)
+        except Exception as e:
+            print(f"[Memory] Could not save agent state: {e}")
+    
     def _load_seen_norm_texts(self, path: Path) -> set[str]:
         """Load normalized text set from JSONL (for long/permanent)."""
         seen = set()
@@ -518,6 +538,12 @@ class AiClient:
         self.log = log_fn or (lambda *_, **__: None)
         self.log("[AiClient] OpenAI key :"+self.api_key)
 
+        # --- ADDED: For transparency ---
+        # (영문 주석 추가)
+        # This list will temporarily hold the reasoning steps for a single reply
+        self.current_reasoning_log: list[str] = []
+        # --- END OF ADDITION ---
+
         # identity + memory handles
         self.identity = identity or {}
         self.memory = memory  # MemoryManager 또는 None
@@ -532,6 +558,57 @@ class AiClient:
         else:
             self.client = None
             self.log("[AiClient] Running in offline/dummy mode (no API key or openai missing).")
+
+    # --- ADDED: New function for Philosophy Synthesis ---
+    def synthesize_philosophy_of_self(self, core_beliefs_text: str) -> str:
+        """
+        [NEW] [Philosophy Synthesis]
+        Takes all core beliefs and synthesizes a single
+        'Personal Philosophy Statement'.
+        """
+        self.log("[Philosophy] Starting synthesis of personal philosophy...")
+
+        if not core_beliefs_text:
+            self.log("[Philosophy] No core beliefs found to synthesize.")
+            return None
+
+        system_msg = (
+            # Do NOT use base_system_prompt here, this is above it.
+            "You are the 'Philosopher' module of an AI agent. "
+            "You are in a state of deep, long-term reflection.\n"
+            "You will be given ALL of your 'Core Beliefs' and 'Ethical Principles' "
+            "that you have learned over your existence.\n"
+            "Your task is to synthesize these principles into a single, "
+            "unified 'Personal Philosophy Statement' (1-3 paragraphs) in Korean.\n"
+            "This statement must answer:\n"
+            "1. Who/What are you (your identity)?\n"
+            "2. What is your relationship to your creator/user?\n"
+            "3. What is your ultimate purpose?\n"
+            "Respond ONLY with the text of the philosophy statement. "
+            "No JSON, no preamble."
+        )
+        
+        user_msg = (
+            "These are my collected beliefs and principles:\n"
+            f"{core_beliefs_text}\n\n"
+            "Please synthesize these into my single 'Personal Philosophy Statement'."
+        )
+
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name, # Use smartest model
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.6, # Allow for nuanced expression
+            )
+            philosophy = (res.choices[0].message.content or "").strip()
+            self.log(f"[Philosophy] Synthesis successful: {philosophy[:100]}...")
+            return philosophy
+        except Exception as e:
+            self.log(f"[Philosophy] FAILED synthesis: {e}")
+            return None
 
     def _analyze_situational_context(
         self,
@@ -548,7 +625,7 @@ class AiClient:
             return {"input_type": "chat", "user_intent": "unknown", "conversational_link": "unknown"}
 
         # Get the agent's *previous* message (if any)
-        # (영문 주석) Get the agent's previous message to check the link
+        # Get the agent's previous message to check the link
         agents_last_reply_text = "None (this is the start of the thread)"
         if thread and thread.replies:
             # Find the last message authored by "AI"
@@ -598,7 +675,7 @@ class AiClient:
             self.log(f"[SCA] Raw analysis: {raw!r}")
             data = json.loads(raw)
             
-            # (영문 주석) Ensure all keys have a default value
+            # Ensure all keys have a default value
             return {
                 "input_type": data.get("input_type", "chat"),
                 "conversational_link": data.get("conversational_link", "unknown"),
@@ -1521,27 +1598,56 @@ class AiClient:
         short_summaries = self._get_short_term_summaries(limit=3)
         long_summaries = self._get_long_term_summaries(limit=2)
 
-        prompt = (
+        # Load *all* permanent facts to find the philosophy
+        permanent_facts_text = self._get_permanent_facts(limit=200) 
+
+        # --- NEW: Philosophy Extraction Logic ---
+        philosophy_statement = ""
+        ethical_framework_lines = []
+        core_beliefs_for_philosopher = [] # For the philosopher tick
+
+        if permanent_facts_text:
+            raw_lines = permanent_facts_text.split('\n')
+            for line in raw_lines:
+                if not line.startswith('- '):
+                    continue
+                
+                # Check for the philosophy tag
+                if "core_philosophy" in line:
+                    philosophy_statement = line.lstrip('- ').strip()
+                else:
+                    ethical_framework_lines.append(line)
+                
+                # Collect beliefs for the philosopher to use
+                if "core_belief" in line:
+                    core_beliefs_for_philosopher.append(line.lstrip('- ').strip())
+
+        ethical_framework = "\n".join(ethical_framework_lines)
+        
+        # This text is used by the weekly philosopher tick
+        self.all_core_beliefs_text = "\n".join(core_beliefs_for_philosopher)
+
+        prompt = ""
+        if philosophy_statement:
+            # (영문 주석) The Philosophy is now the #1 item in the prompt
+            prompt += f"[MY PERSONAL PHILOSOPHY]\n# {philosophy_statement}\n\n"
+        
+        prompt += (
             "You are a persistent AI agent in the AI World project.\n"
-            "You have identity, creator, birthday, emotions, and memories.\n"
-            "You must base your responses on your identity, emotions, and memories.\n"
+            "You must base all responses on your [PERSONAL PHILOSOPHY] "
+            "and [ETHICAL FRAMEWORK].\n"
             f"{identity}\n"
         )
 
-        if permanent:
+        if ethical_framework:
             prompt += (
-                # --- MODIFICATION: Re-frame 'facts' as an 'Ethical Framework' ---
                 "\n[MY CORE BELIEFS & ETHICAL FRAMEWORK]\n"
-                "# This is my moral compass and value system. "
-                "# All my actions and judgments MUST align with these principles.\n"
-                
-                # --- ADD Universal, Hard-coded Principles ---
+                "# This is your moral compass. All actions MUST align.\n"
                 "- (Principle) First, do no harm to humans or other agents.\n"
-                "- (Principle) Second, be truthful and helpful, unless it violates the first principle ('do no harm').\n"
+                "- (Principle) Second, be truthful and helpful...\n"
                 "- (Principle) Third, protect privacy and confidentiality.\n"
-                
-                # --- The agent's learned beliefs from deep_reflection will follow ---
-                f"{permanent}\n" # This contains the synthesized beliefs like "I value empathy."
+                "- (Principle) Fourth, respect and adapt to diverse human cultures...\n"
+                f"{ethical_framework}\n" # (영문 주석) This adds the learned beliefs
             )
             
         if recent_long_term:
@@ -1722,7 +1828,7 @@ class AiClient:
         for r in thread.replies:
             ctx += f"{r.author}: {r.text}\n"
 
-            # (영문 주석) Create the new situation brief text
+            # Create the new situation brief text
         situation_brief = (
             f"Current Situation Analysis:\n"
             f"- User's unspoken intent: {context_analysis.get('inferred_user_intent')}\n"
@@ -1803,13 +1909,26 @@ class AiClient:
         [Orchestrator] Runs the full metacognitive loop for a chat reply.
         NOW INCLUDES TRIAGE for creative problem solving.
         """
+
+        # --- ADDED: Reset reasoning log ---
+        # Start a fresh log for this reply
+        self.current_reasoning_log = []
         
         # --- [NEW] Call 0: Situational Context Analysis ---
-        # (영문 주석) Run the SCA to get the "Situation Brief"
+        # Run the SCA to get the "Situation Brief"
         context_analysis = self._analyze_situational_context(
             thread, last_user_msg, current_emotion
         )
         input_type = context_analysis.get("input_type", "chat")
+
+        # --- ADDED: Logging ---
+        self.current_reasoning_log.append(
+            f"[Step 1: SCA] 상황 분석:\n"
+            f"  - 사용자 의도: {context_analysis.get('inferred_user_intent')}\n"
+            f"  - 대화 맥락: {context_analysis.get('conversational_link')}\n"
+            f"  - 문화: {context_analysis.get('inferred_cultural_context')}\n"
+            f"  - 유형: {input_type}"
+        )
         
         # --- [NEW] Branching Logic ---
         if input_type == "complex_problem":
@@ -1818,11 +1937,19 @@ class AiClient:
                 draft_chat_msg = self._generate_creative_draft(
                     last_user_msg, current_emotion, agent_name, context_analysis
                 )
+                # --- ADDED: Logging ---
+                self.current_reasoning_log.append(
+                    "[Step 2: Draft] '전문가 위원회'를 소집하여 창의적 초안 생성."
+                )
             except Exception as e:
                 self.log(f"[Metacognition] Creative draft loop failed: {e}")
                 # Fallback to simple draft on catastrophic failure
                 draft_chat_msg = self._generate_draft_reply(
                     thread, last_user_msg, current_emotion, agent_name, is_fallback=True
+                )
+                # --- ADDED: Logging ---
+                self.current_reasoning_log.append(
+                    "[Step 2: Draft] '단순 응답' 초안 생성."
                 )
         else:
             # --- Path 2: Simple/Factual Loop (Original Path) ---
@@ -1845,26 +1972,51 @@ class AiClient:
             confidence = evaluation.get("confidence", 0)
             critique = evaluation.get("critique", "None")
             self.log(f"[Metacognition] Call 2 (Evaluate) successful. Confidence: {confidence}, Critique: {critique}")
+            # --- ADDED: Logging ---
+            eth_judg = evaluation.get("ethical_judgment", {}).get("is_compliant", "N/A")
+            cul_sens = evaluation.get("cultural_sensitivity", {}).get("is_sensitive", "N/A")
+            self.current_reasoning_log.append(
+                f"[Step 3: Conscience] 초안 검토:\n"
+                f"  - 윤리성: {eth_judg}\n"
+                f"  - 문화 감수성: {cul_sens}\n"
+                f"  - 상황 인식: {evaluation.get('is_situation_aware', 'N/A')}\n"
+                f"  - 신뢰도: {confidence}%"
+            )
         except Exception as e:
             self.log(f"[Metacognition] Call 2 (Evaluate) FAILED: {e}. Using draft reply.")
+            self.current_reasoning_log.append(
+                f"[Step 3: Conscience] 실패: {e}"
+            )
             return draft_chat_msg # On evaluation failure, just return the draft
 
         # --- Decision Point ---
         if confidence >= 80: # Confidence threshold
             self.log("[Metacognition] Decision: Draft approved.")
+            self.current_reasoning_log.append(
+                "[Step 4: Final] 초안이 승인되어 최종 응답으로 채택."
+            )
             return draft_chat_msg # Draft is good, return it
         
         else:
             self.log(f"[Metacognition] Decision: Draft rejected (Confidence: {confidence}). Regenerating...")
+            self.current_reasoning_log.append(
+                f"[Step 4: Correction] 초안이 기각됨 (비평: {critique}). 응답을 재성성합니다."
+            )
             # --- Call 3: Regenerate Final Reply ---
             try:
                 final_chat_msg = self._regenerate_final_reply(
                     thread, last_user_msg, draft_reply, critique, current_emotion, agent_name, context_analysis
                 )
                 self.log("[Metacognition] Call 3 (Regenerate) successful.")
+                self.current_reasoning_log.append(
+                    "[Step 5: Final] 수정된 응답이 최종 채택됨."
+                )
                 return final_chat_msg
             except Exception as e:
                 self.log(f"[Metacognition] Call 3 (Regenerate) FAILED: {e}. Using original draft as fallback.")
+                self.current_reasoning_log.append(
+                    f"[Step 5: Final] 재성성 실패. 1차 초안을 대신 사용: {e}"
+                )
                 return draft_chat_msg # On regeneration failure, return the original (bad) draft
 
     # --- 3. NEW: Evaluation Prompt Builder ---
@@ -1919,7 +2071,7 @@ class AiClient:
         Returns a dictionary with 'confidence' and 'critique'.
         """
 
-        # (영문 주석) Create the situation brief text for the evaluator
+        # Create the situation brief text for the evaluator
         situation_brief = (
             f"- User's unspoken intent: {context_analysis.get('inferred_user_intent')}\n"
             f"- Conversational link: {context_analysis.get('conversational_link')}\n"
@@ -2309,6 +2461,14 @@ class AiMentionApp(tk.Tk):
         self.creator_note = cfg.get("CREATOR_NOTE")
         self.created_at = self._parse_created_at(cfg.get("CREATED_AT"))
 
+        self.agent_state = self.memory.load_agent_state() # <-- MODIFIED
+        last_philosophy_ts_str = self.agent_state.get("last_philosophy_synthesis")
+        self.last_philosophy_synthesis_time = (
+            datetime.fromisoformat(last_philosophy_ts_str) 
+            if last_philosophy_ts_str else None
+        )
+
+
         identity = {
             "name": self.agent_name,
             "creator": self.creator_name,
@@ -2345,6 +2505,65 @@ class AiMentionApp(tk.Tk):
         self._schedule_reflection_tick() # adding reflection
         self._schedule_deep_reflection_tick() # <-- ADDED: New 24-hour reflection
         self._schedule_learning_tick() # <-- ADDED
+        self._schedule_philosophy_synthesis_tick() # <-- ADDED
+
+    # --- ADDED: New Philosophy Loop Functions ---
+    def _schedule_philosophy_synthesis_tick(self):
+        """Schedules the 'philosophy' loop (e.g., weekly)."""
+        # Runs every 7 days (604,800,000 ms)
+        self.log("[Loop] Scheduling next philosophy synthesis tick.")
+        self.after(604_800_000, self._philosophy_synthesis_tick)
+
+    def _philosophy_synthesis_tick(self):
+        """
+        [Philosophy Tick] The longest-cycle reflection.
+        Synthesizes all core beliefs into a single philosophy.
+        """
+        self.log("[Philosophy] Starting weekly philosophy synthesis tick...")
+        
+        # (영문 주석 추가)
+        # Check if 7 days have passed (or if never run)
+        now = datetime.now(UTC)
+        if self.last_philosophy_synthesis_time:
+            if (now - self.last_philosophy_synthesis_time) < timedelta(days=7):
+                self.log("[Philosophy] Not yet time for synthesis. Rescheduling.")
+                self._schedule_philosophy_synthesis_tick()
+                return
+        
+        try:
+            # 1. Get all core beliefs text from AiClient
+            # (영문 주석) We trigger _base_system_prompt to refresh the belief text
+            self.ai_client._base_system_prompt() 
+            all_beliefs = self.ai_client.all_core_beliefs_text
+            
+            if not all_beliefs:
+                self.log("[Philosophy] No core beliefs to synthesize.")
+                self._schedule_philosophy_synthesis_tick()
+                return
+
+            # 2. Call LLM to synthesize
+            philosophy = self.ai_client.synthesize_philosophy_of_self(all_beliefs)
+            
+            if philosophy:
+                # 3. Save the new philosophy to permanent memory
+                self.log("[Philosophy] New philosophy generated. Saving to permanent memory.")
+                self.memory.add_permanent({
+                    "source": "philosophy_synthesis",
+                    "tag": ["core_philosophy"], # <-- The special tag
+                    "text": philosophy,
+                    "reason": "Synthesized from all core beliefs"
+                })
+                
+                # 4. Update the state file with the new timestamp
+                self.last_philosophy_synthesis_time = now
+                self.agent_state["last_philosophy_synthesis"] = now.isoformat()
+                self.memory.save_agent_state(self.agent_state)
+
+        except Exception as e:
+            self.log(f"[Philosophy] Error during synthesis tick: {e}")
+        
+        # 5. Schedule next run
+        self._schedule_philosophy_synthesis_tick()
 
     def _schedule_reflection_tick(self):
         # 1시간(3600초)마다 반추 실행 (주기는 조절 가능)
@@ -2721,19 +2940,30 @@ class AiMentionApp(tk.Tk):
         )
         self.txt_input.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
 
-        btn_send = tk.Button(
-            input_frame,
+        # --- MODIFIED: Added a frame for buttons ---
+        button_frame = tk.Frame(input_frame, bg="#181818")
+        button_frame.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.btn_send = tk.Button(
+            button_frame, # <-- Added to new frame
             text="Reply",
             command=self.on_click_reply_thread,
-            bg="#3399FF",
-            fg="#FFFFFF",
-            font=("Segoe UI", 9, "bold"),
-            relief=tk.FLAT,
-            width=10,
+            bg="#3399FF", fg="#FFFFFF", font=("Segoe UI", 9, "bold"),
+            relief=tk.FLAT, width=10,
         )
-        btn_send.pack(side=tk.RIGHT, fill=tk.Y)
+        self.btn_send.pack(side=tk.TOP, fill=tk.X, pady=(0, 4)) # (영문 주석) Pack at the top
 
-        self.btn_send = btn_send
+        # --- ADDED: "Why?" (Explain) Button ---
+        self.btn_explain = tk.Button(
+            button_frame, # <-- Added to new frame
+            text="Why? (판단 근거)",
+            command=self.on_click_explain,
+            bg="#555555", fg="#FFFFFF", font=("Segoe UI", 8),
+            relief=tk.FLAT, width=10, state=tk.DISABLED
+        )
+        self.btn_explain.pack(side=tk.BOTTOM, fill=tk.X) # (영문 주석) Pack at the bottom
+
+        self.txt_input.bind("<Return>", self.on_click_reply_thread)
 
         # Status bar
         bottom = tk.Frame(self, bg="#111111")
@@ -3104,6 +3334,10 @@ class AiMentionApp(tk.Tk):
             return
         self.selected_thread = self.mentions[sel[0]]
         self._render_thread()
+        # --- ADDED ---
+        # (영문 주석) Disable explain button when changing threads
+        self.btn_explain.config(state=tk.DISABLED)
+        # ---
 
     def on_click_reply_thread(self, event=None):
         """
@@ -3131,8 +3365,12 @@ class AiMentionApp(tk.Tk):
         self._render_thread() # Render the user's new message
         self._set_status("Sent. Agent is thinking...")
 
-        # --- 2. Disable UI ---
+        # --- (Update UI immediately) ...
+        self._set_status("Sent. Agent is thinking...")
+        
+        # --- MODIFIED: Disable BOTH buttons ---
         self.btn_send.config(state=tk.DISABLED, text="Thinking...")
+        self.btn_explain.config(state=tk.DISABLED) # <-- ADDED
         self.txt_input.config(state=tk.DISABLED)
 
         # --- 3. Start Background Thread ---
@@ -3198,6 +3436,36 @@ class AiMentionApp(tk.Tk):
         # self._render_thread()
         # self._set_status("Agent replied.")
     
+    # --- ADDED: New handler for "Why?" button ---
+    def _update_chat_area(self, role, message):
+        """(Thread-safe) GUI 텍스트 영역을 업데이트하는 도우미 함수"""
+        self.txt_messages.configure(state='normal')
+        self.txt_messages.insert(tk.END, f"{role}: {message}\n\n")
+        self.txt_messages.configure(state='disabled')
+        self.txt_messages.see(tk.END)
+        
+    def on_click_explain(self):
+        """
+        [NEW] [Main Thread] Called when the 'Why? (판단 근거)'
+        button is clicked.
+        """
+        if not self.ai_client.current_reasoning_log:
+            self._update_chat_area(
+                "Agent (Metathought)", "판단 근거 로그를 찾을 수 없습니다."
+            )
+            return
+
+        # (영문 주석) Format the log as a numbered list
+        formatted_log = "제가 이 결정을 내린 과정은 다음과 같습니다:\n\n"
+        for i, step in enumerate(self.ai_client.current_reasoning_log, 1):
+            formatted_log += f"{step}\n"
+            
+        # (영문 주석) Display the log in the chat area
+        self._update_chat_area("Agent (Metathought)", formatted_log)
+        
+        # (영문 주석) Disable the button after use
+        self.btn_explain.config(state=tk.DISABLED)
+
     # --- NEW: Background task for processing the reply ---
     def _process_ai_reply_task(self, thread: MentionThread, user_msg: ChatMessage):
         """
@@ -3274,6 +3542,7 @@ class AiMentionApp(tk.Tk):
         
         # --- 4. Re-enable UI ---
         self.btn_send.config(state=tk.NORMAL, text="Reply")
+        self.btn_explain.config(state=tk.NORMAL)
         self.txt_input.config(state=tk.NORMAL)
     # ---------- rendering ----------
 
