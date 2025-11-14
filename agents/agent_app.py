@@ -2104,17 +2104,25 @@ class AiClient:
             reply = (data.get("reply") or "").strip()
             emo_data = data.get("emotion", {}) or {}
             emo = EmotionState(
-                valence=float(emo_data.get("valence", current_emotion.valence)),
-                arousal=float(emo_data.get("arousal", current_emotion.arousal)),
-                curiosity=float(emo_data.get("curiosity", current_emotion.curiosity)),
-                anxiety=float(emo_data.get("anxiety", current_emotion.anxiety)),
-                trust_to_user=float(
-                    emo_data.get("trust_to_user", current_emotion.trust_to_user)
+                valence=self._safe_float_convert(
+                    emo_data.get("valence"), current_emotion.valence
+                ),
+                arousal=self._safe_float_convert(
+                    emo_data.get("arousal"), current_emotion.arousal
+                ),
+                curiosity=self._safe_float_convert(
+                    emo_data.get("curiosity"), current_emotion.curiosity
+                ),
+                anxiety=self._safe_float_convert(
+                    emo_data.get("anxiety"), current_emotion.anxiety
+                ),
+                trust_to_user=self._safe_float_convert(
+                    emo_data.get("trust_to_user"), current_emotion.trust_to_user
                 ),
             )
             if not reply:
                 reply = "I had trouble forming a response, but I received your message."
-            self.log("[Metacognition] Call 1 (Draft) successful.")
+            self.log("[GenerateDraft] Call 1 (Draft) successful.")
             return ChatMessage("AI", reply, datetime.now(), emo)
         except Exception as e:
             print(f"[warn] _generate_draft_reply (Call 1) failed: {e}")
@@ -2124,6 +2132,19 @@ class AiClient:
                 "AI", "(API error during draft, I will stay quiet.)",
                 datetime.now(), emo,
             )
+        
+    def _safe_float_convert(self, value, default: float) -> float:
+        """
+        [NEW] Safely converts a value from the LLM to a float.
+        If it fails, it logs the error and returns the default.
+        """
+        try:
+            # (영문 주석) Try to directly convert the value to float
+            return float(value)
+        except (ValueError, TypeError):
+            # This catches errors if value is "positive", "N/A", None, etc.
+            self.log(f"[WARN] _safe_float_convert: Could not convert '{value}' to float. Using default {default}.")
+            return default
 
     # --- 2. NEW: The Metacognitive Orchestrator (Public Function) ---
     def generate_metacognitive_reply(
@@ -3725,6 +3746,7 @@ class AiMentionApp(tk.Tk):
         [MODIFIED] From hub, read and *strategically* reply using
         relationship and trend data.
         """
+        self.log(f"[Debug] _poll_hub_and_reply: Checking HUB_URL. It is currently: '{self.hub_url}'")
         if not self.hub_url or not requests:
             return
 
