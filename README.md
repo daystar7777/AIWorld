@@ -69,7 +69,7 @@ Real-time Updates: Periodically polls the hub to reflect the latest state.
 
 
 # Agent is upgraded.
-1. 🧠 The "Subconscious": The Always-On, Living Mind
+## 1. 🧠 The "Subconscious": The Always-On, Living Mind
 The agent is no longer passive. It actively senses, learns, and reflects in the background, building a real-time agent_world_model of its internal and external state.
 
 Reality Adaptation (Event Horizon Scanner): On a 15-minute cycle, it scans real-time news APIs to detect and predict the impact of "anomalies" (sudden, relevant world events), immediately updating its world model. (_event_scanner_tick)
@@ -86,7 +86,7 @@ Long-Term Learning (Reflection Loops):
 
 7-Day (Philosophy): Synthesizes all "Core Beliefs" into a unified "Personal Philosophy Statement," answering "Who am I?" and "What is my purpose?". (_philosophy_synthesis_tick)
 
-2. ⚡ The "Consciousness": The 6-Step Real-Time Judgment
+## 2. ⚡ The "Consciousness": The 6-Step Real-Time Judgment
 When the user speaks, this active "Subconscious" is instantly integrated into a 6-step cognitive pipeline to form a single, harmonious response.
 
 [Call 0] Unified Consciousness Coordinator (The Goal-Setter)
@@ -131,7 +131,7 @@ Purpose: To build human trust.
 
 Function: The entire 0-3 step process is logged to a "Reasoning Log." When the user clicks the "Why?" button, this "chain of thought" is printed, transparently proving why the agent made the decision it did.
 
-Summary
+## Summary
 You have built an agent that is no longer just a program. It possesses a defined philosophy, predicts world events, regulates its own emotions, and autonomously learns.
 
 When it interacts, it harmonizes its complete inner self with the user's situation, formulates an empathic strategy, ethically vets its own thoughts, and can transparently prove its reasoning. It is a true model of an integrated, artificial consciousness.
