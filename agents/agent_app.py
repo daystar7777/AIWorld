@@ -5,6 +5,7 @@ import json
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, date, timezone
+import threading
 from pathlib import Path
 
 UTC = timezone.utc
@@ -1124,6 +1125,323 @@ class AiClient:
             print(f"[warn] summarize_texts failed: {e}")
             return "\n".join(texts[:10])
 
+    # -- new threaded loop with metacog
+    # ... (inside AiClient class)
+
+    # --- 1. RENAME: This is now the "Draft" generator (Call 1) ---
+    # (Formerly generate_ai_reply)
+    def _generate_draft_reply(
+        self,
+        thread: MentionThread,
+        last_user_msg: ChatMessage,
+        current_emotion: EmotionState,
+        agent_name: str,
+    ) -> ChatMessage:
+        """
+        [Call 1] Generates the initial draft reply and emotion.
+        This was the original 'generate_ai_reply' function.
+        """
+        # ... (Same logic as your original 'generate_ai_reply')
+        # ... (This function already returns a ChatMessage, which is perfect)
+
+        if not self.client:
+            # (Offline fallback)
+            emo = current_emotion.clone()
+            emo.curiosity = min(1.0, emo.curiosity + 0.05)
+            emo.trust_to_user = min(1.0, emo.trust_to_user + 0.05)
+            text = f"(offline) {agent_name} quietly acknowledges your message."
+            return ChatMessage("AI", text, datetime.now(), emo)
+
+        ctx = f"Thread title: {thread.title}\nRoot: {thread.root_message.text}\n"
+        for r in thread.replies:
+            ctx += f"{r.author}: {r.text}\n"
+
+        system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nWhen the user replies, respond as THIS specific agent.\n"
+              "Use a consistent tone that matches your personality and core memories.\n"
+              "Return ONLY JSON:\n"
+              "{"
+              "\"reply\":\"1~3문장 한국어\","
+              "\"emotion\":{ ... }" # Full emotion spec
+              "}"
+        )
+
+        messages = [
+            {"role": "system", "content": system_msg},
+            {
+                "role": "assistant",
+                "content": f"Agent: {agent_name}\nCurrent emotion: {current_emotion.to_short_str()}\nThread:\n{ctx}",
+            },
+            {"role": "user", "content": last_user_msg.text},
+        ]
+
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name, # Can use a faster model here if desired
+                messages=messages,
+                temperature=0.7,
+            )
+            data = json.loads(res.choices[0].message.content.strip())
+            reply = (data.get("reply") or "").strip()
+            emo_data = data.get("emotion", {}) or {}
+            emo = EmotionState(
+                valence=float(emo_data.get("valence", current_emotion.valence)),
+                arousal=float(emo_data.get("arousal", current_emotion.arousal)),
+                curiosity=float(emo_data.get("curiosity", current_emotion.curiosity)),
+                anxiety=float(emo_data.get("anxiety", current_emotion.anxiety)),
+                trust_to_user=float(
+                    emo_data.get("trust_to_user", current_emotion.trust_to_user)
+                ),
+            )
+            if not reply:
+                reply = "I had trouble forming a response, but I received your message."
+            self.log("[Metacognition] Call 1 (Draft) successful.")
+            return ChatMessage("AI", reply, datetime.now(), emo)
+        except Exception as e:
+            print(f"[warn] _generate_draft_reply (Call 1) failed: {e}")
+            emo = current_emotion.clone()
+            emo.anxiety = min(1.0, emo.anxiety + 0.1)
+            return ChatMessage(
+                "AI", "(API error during draft, I will stay quiet.)",
+                datetime.now(), emo,
+            )
+
+    # --- 2. NEW: The Metacognitive Orchestrator (Public Function) ---
+    def generate_metacognitive_reply(
+        self,
+        thread: MentionThread,
+        last_user_msg: ChatMessage,
+        current_emotion: EmotionState,
+        agent_name: str,
+    ) -> ChatMessage:
+        """
+        [Orchestrator] Runs the full metacognitive loop for a chat reply.
+        1. Generate Draft
+        2. Evaluate Draft
+        3. (If needed) Regenerate Final Reply
+        """
+        # --- Call 1: Generate Draft ---
+        draft_chat_msg = self._generate_draft_reply(
+            thread, last_user_msg, current_emotion, agent_name
+        )
+        
+        # If draft failed (e.g., offline or API error), return the failure message
+        if "(API error" in draft_chat_msg.text or "(offline)" in draft_chat_msg.text:
+             return draft_chat_msg
+
+        draft_reply = draft_chat_msg.text
+        draft_emotion = draft_chat_msg.emotion_snapshot
+
+        # --- Call 2: Evaluate Draft ---
+        try:
+            evaluation = self._evaluate_draft_reply(
+                thread, last_user_msg, draft_reply, current_emotion
+            )
+            confidence = evaluation.get("confidence", 0)
+            critique = evaluation.get("critique", "None")
+            self.log(f"[Metacognition] Call 2 (Evaluate) successful. Confidence: {confidence}, Critique: {critique}")
+        except Exception as e:
+            self.log(f"[Metacognition] Call 2 (Evaluate) FAILED: {e}. Using draft reply.")
+            return draft_chat_msg # On evaluation failure, just return the draft
+
+        # --- Decision Point ---
+        if confidence >= 80: # Confidence threshold
+            self.log("[Metacognition] Decision: Draft approved.")
+            return draft_chat_msg # Draft is good, return it
+        
+        else:
+            self.log(f"[Metacognition] Decision: Draft rejected (Confidence: {confidence}). Regenerating...")
+            # --- Call 3: Regenerate Final Reply ---
+            try:
+                final_chat_msg = self._regenerate_final_reply(
+                    thread, last_user_msg, draft_reply, critique, current_emotion, agent_name
+                )
+                self.log("[Metacognition] Call 3 (Regenerate) successful.")
+                return final_chat_msg
+            except Exception as e:
+                self.log(f"[Metacognition] Call 3 (Regenerate) FAILED: {e}. Using original draft as fallback.")
+                return draft_chat_msg # On regeneration failure, return the original (bad) draft
+
+    # --- 3. NEW: Evaluation Prompt Builder ---
+    def _build_meta_prompt_for_reply(
+        self, 
+        thread: MentionThread, 
+        user_msg: ChatMessage, 
+        draft_reply: str, 
+        current_emotion: EmotionState
+    ) -> str:
+        """Helper to build the prompt for Call 2 (Evaluation)."""
+        
+        # Build context
+        ctx = f"Thread title: {thread.title}\nRoot: {thread.root_message.text}\n"
+        for r in thread.replies:
+            ctx += f"{r.author}: {r.text}\n"
+        
+        user_prompt = f"""
+        [My Context]
+        My current emotion: {current_emotion.to_short_str()}
+        Conversation history:
+        {ctx}
+
+        [User's Last Message]
+        "{user_msg.text}"
+
+        [My Generated Draft Reply]
+        "{draft_reply}"
+
+        [Task]
+        Evaluate my "Generated Draft Reply" based on the context and user message.
+        Is it aligned with my personality (from system prompt)?
+        Is it relevant to the user's message?
+        Does it conflict with my current emotion or context?
+        Be a strict critic.
+        """
+        return user_prompt
+
+    # --- 4. NEW: Evaluation Function (Call 2) ---
+    def _evaluate_draft_reply(
+        self, 
+        thread: MentionThread, 
+        user_msg: ChatMessage, 
+        draft_reply: str, 
+        current_emotion: EmotionState
+    ) -> dict:
+        """
+        [Call 2] Calls the LLM to evaluate the draft reply.
+        Returns a dictionary with 'confidence' and 'critique'.
+        """
+        # System prompt defines the role and JSON output
+        system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nYou are a 'Metacognitive Evaluator' for an AI agent."
+            "\nYour job is to critique a draft reply based on context."
+            "\nRespond ONLY in the following strict JSON format:"
+            "\n{"
+            "\n  \"is_aligned\": (Is the draft aligned with my personality/history? true/false),"
+            "\n  \"is_relevant\": (Does it directly answer the user? true/false),"
+            "\n  \"critique\": (If false, a brief reason why it's bad and how to fix it. If good, write \"None\"),"
+            "\n  \"confidence\": (A score 0-100 on how confident you are to send this reply.)"
+            "\n}"
+        )
+        
+        # User prompt contains the actual data to evaluate
+        user_prompt = self._build_meta_prompt_for_reply(
+            thread, user_msg, draft_reply, current_emotion
+        )
+
+        res = self.client.chat.completions.create(
+            model=self.model_name, # Use a smart model (not mini) for evaluation
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1, # Low temp for strict evaluation
+        )
+        raw = (res.choices[0].message.content or "").strip()
+        
+        # Parse JSON
+        try:
+            data = json.loads(raw)
+        except Exception:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                data = json.loads(raw[start:end+1])
+            else:
+                raise ValueError("No valid JSON found in evaluation response")
+        
+        return data
+
+    # --- 5. NEW: Regeneration Function (Call 3) ---
+    def _regenerate_final_reply(
+        self,
+        thread: MentionThread,
+        last_user_msg: ChatMessage,
+        bad_draft: str,
+        critique: str,
+        current_emotion: EmotionState,
+        agent_name: str
+    ) -> ChatMessage:
+        """
+        [Call 3] Generates a new, final reply based on the critique.
+        This re-uses the logic from _generate_draft_reply but adds the
+        critique to the user message.
+        """
+        # Build context (same as draft generation)
+        ctx = f"Thread title: {thread.title}\nRoot: {thread.root_message.text}\n"
+        for r in thread.replies:
+            ctx += f"{r.author}: {r.text}\n"
+
+        # System prompt (same as draft generation)
+        system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nWhen the user replies, respond as THIS specific agent.\n"
+              "Use a consistent tone that matches your personality and core memories.\n"
+              "Return ONLY JSON:\n"
+              "{"
+              "\"reply\":\"1~3문장 한국어\","
+              "\"emotion\":{ ... }" # Full emotion spec
+              "}"
+        )
+
+        # --- MODIFIED User Prompt ---
+        # This is the key difference: we include the critique
+        regeneration_user_prompt = f"""
+        User's last message: "{last_user_msg.text}"
+        
+        My first attempt at a reply was:
+        "{bad_draft}"
+
+        My internal critique of that draft was:
+        "{critique}"
+
+        Please generate a new, corrected reply that fixes the problems
+        mentioned in the critique.
+        """
+
+        messages = [
+            {"role": "system", "content": system_msg},
+            {
+                "role": "assistant", # Priming
+                "content": f"Agent: {agent_name}\nCurrent emotion: {current_emotion.to_short_str()}\nThread:\n{ctx}",
+            },
+            {"role": "user", "content": regeneration_user_prompt}, # Use the new prompt
+        ]
+
+        # This logic is identical to the end of _generate_draft_reply
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name, # Use smart model for correction
+                messages=messages,
+                temperature=0.7,
+            )
+            data = json.loads(res.choices[0].message.content.strip())
+            reply = (data.get("reply") or "").strip()
+            emo_data = data.get("emotion", {}) or {}
+            emo = EmotionState(
+                valence=float(emo_data.get("valence", current_emotion.valence)),
+                arousal=float(emo_data.get("arousal", current_emotion.arousal)),
+                curiosity=float(emo_data.get("curiosity", current_emotion.curiosity)),
+                anxiety=float(emo_data.get("anxiety", current_emotion.anxiety)),
+                trust_to_user=float(
+                    emo_data.get("trust_to_user", current_emotion.trust_to_user)
+                ),
+            )
+            if not reply:
+                reply = "I tried to correct my response, but still had trouble."
+            return ChatMessage("AI", reply, datetime.now(), emo)
+        except Exception as e:
+            print(f"[warn] _regenerate_final_reply (Call 3) failed: {e}")
+            # Fallback: create an error message
+            emo = current_emotion.clone()
+            emo.anxiety = min(1.0, emo.anxiety + 0.2)
+            return ChatMessage(
+                "AI", "(API error during regeneration.)",
+                datetime.now(), emo,
+            )
+
+   
     # --- reply within a thread ---
 
     def generate_ai_reply(
@@ -1225,7 +1543,7 @@ class AiClient:
             "\nYou must:\n"
             "1) Briefly summarize what this content is about (1~2 sentences).\n"
             "2) Then add your own reflection: what you think or feel about it,\n"
-            "   based on your personality, interests, and values (1~3 sentences).\n"
+            "   based on your personality, interests, and values (3~10 sentences).\n"
             "3) Update your internal emotion state consistently.\n"
             "Write in Korean, as this specific agent.\n"
             "Respond ONLY in JSON with this schema:\n"
@@ -1638,7 +1956,7 @@ class AiMentionApp(tk.Tk):
         btn_send = tk.Button(
             input_frame,
             text="Reply",
-            command=self.on_click_reply,
+            command=self.on_click_reply_thread,
             bg="#3399FF",
             fg="#FFFFFF",
             font=("Segoe UI", 9, "bold"),
@@ -1646,6 +1964,8 @@ class AiMentionApp(tk.Tk):
             width=10,
         )
         btn_send.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.btn_send = btn_send
 
         # Status bar
         bottom = tk.Frame(self, bg="#111111")
@@ -2012,7 +2332,12 @@ class AiMentionApp(tk.Tk):
         self.selected_thread = self.mentions[sel[0]]
         self._render_thread()
 
-    def on_click_reply(self):
+    def on_click_reply_thread(self, event=None):
+        """
+        [Main Thread] Called when the 'Reply' button is clicked.
+        This function just starts a background thread to do the real work,
+        keeping the UI responsive.
+        """
         if not self.selected_thread:
             self._set_status("Select a local mention first.")
             return
@@ -2021,6 +2346,7 @@ class AiMentionApp(tk.Tk):
         if not text:
             return
 
+        # --- 1. Update UI immediately (User's message) ---
         user_msg = ChatMessage(
             author="User",
             text=text,
@@ -2029,27 +2355,127 @@ class AiMentionApp(tk.Tk):
         )
         self.selected_thread.replies.append(user_msg)
         self.txt_input.delete("1.0", tk.END)
-        self._set_status("Sent. Waiting for agent reply...")
+        self._render_thread() # Render the user's new message
+        self._set_status("Sent. Agent is thinking...")
 
-        ai_msg = self.ai_client.generate_ai_reply(
-            self.selected_thread,
-            user_msg,
-            self.current_emotion,
-            self.agent_name,
+        # --- 2. Disable UI ---
+        self.btn_send.config(state=tk.DISABLED, text="Thinking...")
+        self.txt_input.config(state=tk.DISABLED)
+
+        # --- 3. Start Background Thread ---
+        # Pass all necessary data to the thread
+        thread = threading.Thread(
+            target=self._process_ai_reply_task,
+            args=(self.selected_thread, user_msg),
+            daemon=True
         )
-        self.selected_thread.replies.append(ai_msg)
-        self.current_emotion = ai_msg.emotion_snapshot.clone()
+        thread.start()
+        # if not self.selected_thread:
+        #     self._set_status("Select a local mention first.")
+        #     return
+
+        # text = self.txt_input.get("1.0", tk.END).strip()
+        # if not text:
+        #     return
+
+        # user_msg = ChatMessage(
+        #     author="User",
+        #     text=text,
+        #     timestamp=datetime.now(),
+        #     emotion_snapshot=self._estimate_user_emotion(text),
+        # )
+        # self.selected_thread.replies.append(user_msg)
+        # self.txt_input.delete("1.0", tk.END)
+        # self._set_status("Sent. Waiting for agent reply...")
+
+        # ai_msg = self.ai_client.generate_ai_reply(
+        #     self.selected_thread,
+        #     user_msg,
+        #     self.current_emotion,
+        #     self.agent_name,
+        # )
+        # self.selected_thread.replies.append(ai_msg)
+        # self.current_emotion = ai_msg.emotion_snapshot.clone()
        
-        # dialog pair
+        # # dialog pair
+        # dialogue_pair_text = f"[User]: {user_msg.text}\n[AI]: {ai_msg.text}"
+
+        # self.memory.add_short({
+        #     "type": "dialogue_pair",
+        #     "text": dialogue_pair_text, # AI save dialog pair
+        # })
+        # self.memory.compress_short_if_needed(self.ai_client.summarize_texts)
+
+        # # store important ones to long-term (simple heuristic)
+        # importance = (
+        #     abs(self.current_emotion.valence)
+        #     + self.current_emotion.curiosity
+        #     + self.current_emotion.trust_to_user
+        # )
+        # if importance > 2.0:
+        #     self.memory.add_long({
+        #         "text": dialogue_pair_text, # AI save dialog pair
+        #         "emotion": asdict(self.current_emotion),
+        #         "reason": "high_importance_interaction",
+        #     })
+        #     self.memory.summarize_long_if_needed(self.ai_client.summarize_texts)
+
+        # self.memory.save_mentions(self.mentions)
+        # self._update_emotion_label()
+        # self._render_thread()
+        # self._set_status("Agent replied.")
+    
+    # --- NEW: Background task for processing the reply ---
+    def _process_ai_reply_task(self, thread: MentionThread, user_msg: ChatMessage):
+        """
+        [Worker Thread] This runs in the background.
+        It calls the (slow) metacognitive AI function.
+        """
+        try:
+            # --- THIS IS THE SLOW PART ---
+            # Call the new metacognitive function
+            ai_msg = self.ai_client.generate_metacognitive_reply(
+                thread,
+                user_msg,
+                self.current_emotion,
+                self.agent_name,
+            )
+            # --- ---
+
+            # When done, schedule the UI update back on the main thread
+            self.after(0, self._finish_ai_reply_ui, thread, ai_msg, user_msg)
+        
+        except Exception as e:
+            self.log(f"Error in _process_ai_reply_task: {e}")
+            # Create a fallback error message
+            emo = self.current_emotion.clone()
+            emo.anxiety = min(1.0, emo.anxiety + 0.2)
+            ai_msg = ChatMessage("AI", "(Internal error in reply thread)", datetime.now(), emo)
+            
+            # Schedule the UI update even on failure
+            self.after(0, self._finish_ai_reply_ui, thread, ai_msg, user_msg)
+
+    # --- NEW: UI update function called by the thread ---
+    def _finish_ai_reply_ui(self, thread: MentionThread, ai_msg: ChatMessage, user_msg: ChatMessage):
+        """
+        [Main Thread] This function is called via self.after()
+        to safely update the UI from the main thread once the
+        background task is complete.
+        """
+        # --- 1. Add AI message and update emotion ---
+        thread.replies.append(ai_msg)
+        self.current_emotion = ai_msg.emotion_snapshot.clone()
+        
+        # --- 2. Save to Memory ---
         dialogue_pair_text = f"[User]: {user_msg.text}\n[AI]: {ai_msg.text}"
 
         self.memory.add_short({
             "type": "dialogue_pair",
-            "text": dialogue_pair_text, # AI save dialog pair
+            "text": dialogue_pair_text,
         })
         self.memory.compress_short_if_needed(self.ai_client.summarize_texts)
 
-        # store important ones to long-term (simple heuristic)
+        # Assess importance (local heuristic)
         importance = (
             abs(self.current_emotion.valence)
             + self.current_emotion.curiosity
@@ -2057,16 +2483,22 @@ class AiMentionApp(tk.Tk):
         )
         if importance > 2.0:
             self.memory.add_long({
-                "text": dialogue_pair_text, # AI save dialog pair
+                "text": dialogue_pair_text,
                 "emotion": asdict(self.current_emotion),
                 "reason": "high_importance_interaction",
             })
             self.memory.summarize_long_if_needed(self.ai_client.summarize_texts)
 
-        self.memory.save_mentions(self.mentions)
+        self.memory.save_mentions(self.mentions) # Save all threads
+        
+        # --- 3. Update UI ---
         self._update_emotion_label()
-        self._render_thread()
+        self._render_thread() # Render the new AI message
         self._set_status("Agent replied.")
+        
+        # --- 4. Re-enable UI ---
+        self.btn_send.config(state=tk.NORMAL, text="Reply")
+        self.txt_input.config(state=tk.NORMAL)
     # ---------- rendering ----------
 
     def _render_thread(self):
