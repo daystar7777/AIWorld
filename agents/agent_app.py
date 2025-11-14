@@ -1571,6 +1571,7 @@ class AiClient:
         for r in thread.replies:
             ctx += f"{r.author}: {r.text}\n"
         
+        emotion_description = current_emotion.get_qualitative_description()
         user_prompt = f"""
         [My Context]
         My current personality is in the system prompt.
