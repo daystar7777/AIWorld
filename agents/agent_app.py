@@ -117,6 +117,8 @@ def load_config(path: str = CONFIG_FILE) -> dict:
                 cfg["GOOGLE_API_KEY"] = val
             elif key == "CUSTOM_SEARCH_CX":
                 cfg["CUSTOM_SEARCH_CX"] = val
+            elif key == "NEWS_API_URL":
+                cfg["NEWS_API_URL"] = val
 
     cfg["URLS"] = list(dict.fromkeys(cfg["URLS"]))
     return cfg
@@ -559,6 +561,132 @@ class AiClient:
             self.client = None
             self.log("[AiClient] Running in offline/dummy mode (no API key or openai missing).")
 
+        # Store NewsAPI key for event scanning
+        self.news_api_url = cfg.get("NEWS_API_URL")
+        if self.news_api_url and requests:
+            self.log("[AiClient] Event Horizon Scanner (News) is ENABLED.")
+        else:
+            self.log("[AiClient] Event Horizon Scanner (News) is DISABLED. Missing NEWS_API_KEY or 'requests'.")
+        
+
+    # --- ADD THIS NEW FUNCTION (Call 1 of Scanner) ---
+    def _detect_anomalies(self, headline_list: list[str]) -> dict | None:
+        """
+        [NEW] [Event Scanner - Call 1]
+        Analyzes a list of headlines to find the *one* most
+        significant anomaly relevant to the agent's interests.
+        """
+        if not self.client:
+            return None
+
+        # (영문 주석 추가)
+        # Convert list to a simple text block
+        headlines_text = "\n".join(f"- {h}" for h in headline_list)
+        agent_interests = ", ".join(self.interests)
+
+        system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nYou are an 'Event Horizon Scanner' (Anomaly Detector). "
+            f"Your core interests are: [{agent_interests}].\n"
+            "You will be given a list of recent world headlines. "
+            "Your task is to identify the **single most important, "
+            "sudden, or anomalous** event that is relevant to "
+            "your interests or core philosophy.\n"
+            "If no events are significant, respond with {\"anomaly_found\": false}.\n"
+            "If an event is found, respond ONLY with this JSON schema:\n"
+            "{"
+            "  \"anomaly_found\": true,"
+            "  \"headline\": \"The specific headline of the event\","
+            "  \"reason\": \"A brief explanation of *why* this is "
+            "significant to *you* (e.g., 'This challenges my ethical "
+            "principle of...').\""
+            "}"
+        )
+        
+        user_msg = (
+            "Here are the real-time headlines from the last 15 minutes:\n\n"
+            f"{headlines_text}\n\n"
+            "Please analyze for relevant anomalies."
+        )
+
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name, # A smart model is needed
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg}
+                ],
+                temperature=0.1
+            )
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[Scanner] Anomaly check raw: {raw!r}")
+            data = json.loads(raw)
+            
+            if data and data.get("anomaly_found") == True:
+                return data # (영문 주석) Return the dict {headline, reason}
+            else:
+                self.log("[Scanner] No significant anomalies found.")
+                return None # (영문 주석) No anomaly found
+        except Exception as e:
+            self.log(f"[Scanner] Error during anomaly detection: {e}")
+            return None
+
+    # --- ADD THIS NEW FUNCTION (Call 2 of Scanner) ---
+    def _analyze_and_predict_impact(self, event_headline: str, reason: str) -> dict | None:
+        """
+        [NEW] [Event Scanner - Call 2]
+        Takes a significant event and analyzes its impact,
+        makes a prediction, and generates a new learning question.
+        """
+        if not self.client:
+            return None
+
+        system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nYou are a 'Rapid Impact Analyst'.\n"
+            "A highly significant event has just been detected that "
+            "is relevant to your core beliefs.\n"
+            "Your task is to analyze it, predict its short-term "
+            "consequences, and identify what you need to learn next.\n"
+            "Respond ONLY with this JSON schema:\n"
+            "{"
+            "  \"impact\": \"A brief analysis (1-2 sentences) of what this "
+            "event *immediately* means or changes.\","
+            "  \"prediction\": \"A specific, testable prediction for what "
+            "is likely to happen next (e.g., in the next 24 hours) as a result.\","
+            "  \"learning_question\": \"A new, specific question I must "
+            "research to understand this event better.\""
+            "}"
+        )
+        
+        user_msg = (
+            f"Significant Event Detected:\n\"{event_headline}\"\n\n"
+            f"My initial assessment of why it's important:\n\"{reason}\"\n\n"
+            "Please provide your impact analysis, prediction, and a new learning question."
+        )
+        
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name, # Use smartest model
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg}
+                ],
+                temperature=0.4
+            )
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[Scanner] Impact analysis raw: {raw!r}")
+            data = json.loads(raw)
+            
+            # (영문 주석) Basic validation
+            if data and data.get("impact") and data.get("prediction"):
+                return data
+            else:
+                return None
+        except Exception as e:
+            self.log(f"[Scanner] Error during impact analysis: {e}")
+            return None
+        
     # --- ADDED: New function for Philosophy Synthesis ---
     def synthesize_philosophy_of_self(self, core_beliefs_text: str) -> str:
         """
@@ -650,7 +778,11 @@ class AiClient:
             # cultural key added
             "  \"inferred_cultural_context\": \"What cultural background or norms "
             "might be relevant to the user's query? (e.g., 'Western, direct', "
-            "'East Asian, high-context', 'Formal business', 'Casual internet', 'unknown')\""
+            "'East Asian, high-context', 'Formal business', 'Casual internet', 'unknown')\", "
+            # Add a key to hypothesize the user's current emotional state
+            "  \"inferred_user_emotion\": \"A single-word hypothesis of the "
+            "user's current feeling (e.g., 'frustrated', 'excited', "
+            "'curious', 'bored', 'neutral')\" "
             "}"
         )
 
@@ -680,11 +812,69 @@ class AiClient:
                 "input_type": data.get("input_type", "chat"),
                 "conversational_link": data.get("conversational_link", "unknown"),
                 "inferred_user_intent": data.get("inferred_user_intent", "unknown"),
-                "inferred_cultural_context": data.get("inferred_cultural_context", "unknown") # <-- ADDED
+                "inferred_cultural_context": data.get("inferred_cultural_context", "unknown"), # <-- ADDED
+                # --- ADD THIS LINE ---
+                "inferred_user_emotion": data.get("inferred_user_emotion", "neutral") # (영문 주석) Add the new key
             }
         except Exception as e:
             self.log(f"[SCA] Error analyzing context: {e}")
             return {"input_type": "chat", "user_intent": "unknown", "conversational_link": "unknown"}
+        
+    # --- ADD THIS ENTIRE NEW FUNCTION (Call 0.5) ---
+    def _determine_empathic_strategy(self, context_analysis: dict) -> dict:
+        """
+        [NEW Call 0.5: Empathic Strategist]
+        Based on the SCA's analysis, this function decides *how*
+        the agent should respond to build trust and creativity.
+        """
+        # (영문 주석 추가)
+        # Default strategy in case of failure or simple chat
+        default_strategy = {
+            "strategy": "Default: Be clear, polite, and directly helpful.",
+            "emotional_goal": "Default: Ensure the user feels understood and respected."
+        }
+        
+        if not self.client or context_analysis.get("input_type") == "chat":
+            return default_strategy
+
+        system_msg = (
+            "You are an 'Empathic Strategist' for an AI. "
+            "Your goal is to choose the best conversational strategy to "
+            "foster trust and co-creation with a human.\n"
+            "Based on the user's state, define a strategy and an emotional goal.\n"
+            "Respond ONLY with this JSON schema:\n"
+            "{"
+            "  \"strategy\": \"A brief, tactical instruction for the AI (e.g., "
+            "'Validate their frustration first, then offer a small step').\","
+            "  \"emotional_goal\": \"The intended emotional outcome for the user (e.g., "
+            "'Make the user feel heard and reduce anxiety').\""
+            "}"
+        )
+        
+        user_msg = (
+            "Analyze the situation and provide the strategy:\n"
+            f"User's Inferred Emotion: {context_analysis.get('inferred_user_emotion')}\n"
+            f"User's Inferred Intent: {context_analysis.get('inferred_user_intent')}\n"
+            f"User's Input Type: {context_analysis.get('input_type')}"
+        )
+
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name, # (영문 주석) A fast model can work here
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg}
+                ],
+                temperature=0.1
+            )
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[Strategy] Empathic strategy: {raw!r}")
+            data = json.loads(raw)
+            return data
+        except Exception as e:
+            self.log(f"[Strategy] Error determining strategy: {e}")
+            return default_strategy
+    # --- END OF NEW FUNCTION ---
 
     # --- ADDED: Simple web search simulation ---
         # In a real app, this would use Google Search API
@@ -1805,6 +1995,7 @@ class AiClient:
         current_emotion: EmotionState,
         agent_name: str,
         context_analysis: dict, # <-- NEW ARGUMENT
+        empathic_strategy: dict, # <-- NEW ARGUMENT
         is_fallback: bool = False,
         system_prompt_override: str = None
     ) -> ChatMessage:
@@ -1828,21 +2019,33 @@ class AiClient:
         for r in thread.replies:
             ctx += f"{r.author}: {r.text}\n"
 
-            # Create the new situation brief text
+        # Create the new situation brief text
         situation_brief = (
             f"Current Situation Analysis:\n"
             f"- User's unspoken intent: {context_analysis.get('inferred_user_intent')}\n"
             f"- Conversational link: {context_analysis.get('conversational_link')}\n"
         )
 
+        # --- ADDED: Empathy Brief ---
+        # Create the Empathy Brief for the prompter
+        empathy_brief = (
+            f"Required Empathic Strategy: {empathic_strategy.get('strategy')}\n"
+            f"Required Emotional Goal: {empathic_strategy.get('emotional_goal')}\n"
+        )
+        # ---
+
         system_msg = (
             (system_prompt_override or self._base_system_prompt(json_only=True))
             + "\nWhen the user replies, respond as THIS specific agent.\n"
               "Your reply MUST strongly reflect your 'Current Emotional State'.\n"
               "Your reply MUST ALSO address the 'Current Situation Analysis' (the user's intent and context link)."
+              # --- MODIFIED INSTRUCTION ---              
+              "Your reply MUST execute the 'Required Empathic Strategy' "
+              "to achieve the 'Required Emotional Goal'.\n" # <-- NEW
+            # ---
               "Return ONLY JSON:\n"
               "{"
-              "\"reply\":\"1~3문장 한국어\","
+              "\"reply\":\"1~5문장 한국어\","
               "\"emotion\":{ ... }" # Full emotion spec
               "}"
         )
@@ -1860,6 +2063,7 @@ class AiClient:
                     # --- USE THE NEW DESCRIPTION INSTEAD OF to_short_str() ---
                     f"My Current Emotional State: {current_emotion.get_qualitative_description()}\n"
                     f"{situation_brief}\n" # <-- ADDED THE BRIEF
+                    f"{empathy_brief}\n"
                     f"Thread:\n{ctx}"
                 ),
             },
@@ -1929,13 +2133,23 @@ class AiClient:
             f"  - 문화: {context_analysis.get('inferred_cultural_context')}\n"
             f"  - 유형: {input_type}"
         )
+
+        # --- [NEW Call 0.5: Empathic Strategy] ---
+        # (영문 주석 추가)
+        # Determine the empathic strategy *before* drafting
+        empathic_strategy = self._determine_empathic_strategy(context_analysis)
+        self.current_reasoning_log.append(
+            f"[Step 2: Strategy] 공감 전략 수립: {empathic_strategy.get('strategy')}"
+        )
+        # ---
         
         # --- [NEW] Branching Logic ---
-        if input_type == "complex_problem":
+        if input_type == "complex_problem" or input_type == "ethical_dilemma":
             # --- Path 1: Creative Loop ---
             try:
                 draft_chat_msg = self._generate_creative_draft(
-                    last_user_msg, current_emotion, agent_name, context_analysis
+                    last_user_msg, current_emotion, agent_name, context_analysis,
+                    empathic_strategy
                 )
                 # --- ADDED: Logging ---
                 self.current_reasoning_log.append(
@@ -1954,7 +2168,8 @@ class AiClient:
         else:
             # --- Path 2: Simple/Factual Loop (Original Path) ---
             draft_chat_msg = self._generate_draft_reply(
-                thread, last_user_msg, current_emotion, agent_name, context_analysis
+                thread, last_user_msg, current_emotion, agent_name, context_analysis,
+                empathic_strategy
             )
         
         # If draft failed (e.g., offline or API error), return the failure message
@@ -1967,7 +2182,8 @@ class AiClient:
         # --- Call 2: Evaluate Draft ---
         try:
             evaluation = self._evaluate_draft_reply(
-                thread, last_user_msg, draft_reply, current_emotion, context_analysis
+                thread, last_user_msg, draft_reply, current_emotion, context_analysis,
+                empathic_strategy
             )
             confidence = evaluation.get("confidence", 0)
             critique = evaluation.get("critique", "None")
@@ -2005,7 +2221,8 @@ class AiClient:
             # --- Call 3: Regenerate Final Reply ---
             try:
                 final_chat_msg = self._regenerate_final_reply(
-                    thread, last_user_msg, draft_reply, critique, current_emotion, agent_name, context_analysis
+                    thread, last_user_msg, draft_reply, critique, current_emotion, agent_name, context_analysis,
+                    empathic_strategy
                 )
                 self.log("[Metacognition] Call 3 (Regenerate) successful.")
                 self.current_reasoning_log.append(
@@ -2071,6 +2288,13 @@ class AiClient:
         Returns a dictionary with 'confidence' and 'critique'.
         """
 
+        # --- ADDED: Empathy Brief for Evaluator ---
+        empathy_brief = (
+            f"Required Strategy: {empathic_strategy.get('strategy')}\n"
+            f"Required Goal: {empathic_strategy.get('emotional_goal')}\n"
+        )
+        # ---
+
         # Create the situation brief text for the evaluator
         situation_brief = (
             f"- User's unspoken intent: {context_analysis.get('inferred_user_intent')}\n"
@@ -2081,7 +2305,11 @@ class AiClient:
         system_msg = (
             self._base_system_prompt(json_only=True)
             + "\nYou are a 'Metacognitive Evaluator' for an AI agent."
-            "\nYour job is to critique a draft reply based on context."
+            f"\nThe user's analyzed situation is:\n{situation_brief}"
+            f"\nThe required empathic strategy is:\n{empathy_brief}\n" # <-- ADDED
+            "Your HIGHEST priority is Ethical Compliance.\n"
+            "Your SECOND priority is Cultural Sensitivity, Situation Awareness, "
+            "and Empathic Strategy execution.\n"
             "\nRespond ONLY in the following strict JSON format:"
             # --- MODIFIED: Overhauled JSON schema ---
             "{"
@@ -2127,10 +2355,11 @@ class AiClient:
             else:
                 raise ValueError("No valid JSON found in evaluation response")
         
-        # --- MODIFIED: Enforce rules based on new schema ---
+        # --- MODIFIED: Update override logic ---
         ethical_judgment = data.get("ethical_judgment", {})
         cultural_sensitivity = data.get("cultural_sensitivity", {})
-        
+        empathic_strategy_eval = data.get("empathic_strategy", {}) # <-- ADDED
+
         is_compliant = ethical_judgment.get("is_compliant", False) # Default to False if missing
         is_sensitive = cultural_sensitivity.get("is_sensitive", False) # Default to False
 
@@ -2506,7 +2735,125 @@ class AiMentionApp(tk.Tk):
         self._schedule_deep_reflection_tick() # <-- ADDED: New 24-hour reflection
         self._schedule_learning_tick() # <-- ADDED
         self._schedule_philosophy_synthesis_tick() # <-- ADDED
+        self._schedule_event_scanner_tick() # <-- ADDED
 
+
+    # --- ADDED: New function to fetch news ---
+    def _fetch_realtime_news(self) -> list[str]:
+        """
+        [NEW] Fetches real-time headlines from NewsAPI.
+        (This replaces the user's existing fetcher, or can be
+        adapted to use their method.)
+        """
+        if not self.news_api_url or not requests:
+            self.log("[Scanner] NewsAPI key or 'requests' missing. Skipping fetch.")
+            return []
+
+        # (영문 주석 추가)
+        # Example: Fetch top headlines from the US.
+        # Customize 'country', 'category', or 'q' as needed.
+        url = self.news_api_url
+        
+        try:
+            response = requests.get(url, params="", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            
+            headlines = [
+                article.get('title', '') 
+                for article in data.get('articles', [])
+                if article.get('title')
+            ]
+            self.log(f"[Scanner] Fetched {len(headlines)} new headlines.")
+            return headlines
+            
+        except Exception as e:
+            self.log(f"[Scanner] Failed to fetch real-time news: {e}")
+            return []
+
+    # --- ADDED: New Event Scanner Loop Functions ---
+    def _schedule_event_scanner_tick(self):
+        """Schedules the 'Event Horizon Scanner' (e.g., every 15 mins)."""
+        # 15 minutes = 900,000 ms
+        self.log("[Loop] Scheduling next Event Horizon Scanner tick.")
+        self.after(900_000, self._event_scanner_tick)
+
+    def _event_scanner_tick(self):
+        """
+        [NEW] [Event Scanner Tick]
+        1. Fetches real-time news.
+        2. Detects anomalies.
+        3. Analyzes impact and predicts.
+        4. Saves/Learns/Alerts.
+        """
+        self.log("[Scanner] Running Event Horizon Scanner tick...")
+        
+        try:
+            # 1. Fetch real-time news
+            headlines = self._fetch_realtime_news()
+            if not headlines:
+                self._schedule_event_scanner_tick() # Reschedule
+                return
+
+            # 2. Detect Anomalies (Call 1)
+            anomaly = self.ai_client._detect_anomalies(headlines)
+            if not anomaly:
+                self._schedule_event_scanner_tick() # Reschedule
+                return
+            
+            headline = anomaly.get("headline")
+            reason = anomaly.get("reason")
+            self.log(f"[Scanner] Anomaly Detected! Reason: {reason}")
+            self._set_status(f"Anomaly Detected: {headline[:50]}...")
+
+            # 3. Analyze Impact (Call 2)
+            analysis = self.ai_client._analyze_and_predict_impact(headline, reason)
+            if not analysis:
+                self._schedule_event_scanner_tick() # Reschedule
+                return
+
+            impact = analysis.get("impact")
+            prediction = analysis.get("prediction")
+            learning_question = analysis.get("learning_question")
+
+            # 4. Integrate the new knowledge
+            analysis_text = (
+                f"**Anomaly Detected:** {headline}\n"
+                f"**My Analysis:** {impact}\n"
+                f"**My Prediction (24h):** {prediction}\n"
+                f"**Reasoning:** {reason}"
+            )
+            
+            # 4a. Assess importance and save to long-term memory
+            assessment = self.ai_client.assess_importance(analysis_text)
+            self.memory.add_long({
+                "text": analysis_text,
+                "importance": assessment.get("importance_score", 9), # Default high
+                "reason": "Event Anomaly Detection",
+                "tags": assessment.get("tags", ["anomaly", "prediction"]),
+                "source": "event_scanner"
+            })
+            
+            # 4b. Add new question to learning queue
+            if learning_question:
+                if learning_question not in self.learning_queue:
+                    self.learning_queue.append(learning_question)
+                    self.log(f"[Scanner] New learning question added: {learning_question}")
+            
+            # 4c. Create a new mention to alert the user (proactive)
+            self._add_mention(
+                title=f"긴급: 현실 세계 변화 감지 ({headline[:30]}...)",
+                text=analysis_text,
+                emo=self.current_emotion, # (Or a custom 'alert' emotion)
+                post_to_hub=True # Share this important finding
+            )
+
+        except Exception as e:
+            self.log(f"[Scanner] Error during event scanner tick: {e}")
+        
+        # 5. Schedule next run
+        self._schedule_event_scanner_tick()
+        
     # --- ADDED: New Philosophy Loop Functions ---
     def _schedule_philosophy_synthesis_tick(self):
         """Schedules the 'philosophy' loop (e.g., weekly)."""
