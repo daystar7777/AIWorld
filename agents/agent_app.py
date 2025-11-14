@@ -559,7 +559,7 @@ class AiClient:
         
         # Build the system prompt for the analyzer
         system_msg = (
-            # (영문 주석) Load the agent's full profile to understand its own context
+            # Load the agent's full profile to understand its own context
             self._base_system_prompt(json_only=True)
             + "\nYou are a 'Situational Context Analyzer'. "
             "Your job is to analyze the user's *latest_message* in relation "
@@ -570,6 +570,10 @@ class AiClient:
             "  \"input_type\": \"chat\" | \"factual_question\" | \"complex_problem\", "
             "  \"conversational_link\": \"direct_answer\" | \"follow_up_question\" | \"topic_change\" | \"ignores_agent_question\" | \"new_request\" | \"greeting\", "
             "  \"inferred_user_intent\": \"A brief hypothesis of the user's *unspoken* goal (e.g., 'seeking validation', 'testing my knowledge', 'venting frustration', 'making a joke')\""
+            # cultural key added
+            "  \"inferred_cultural_context\": \"What cultural background or norms "
+            "might be relevant to the user's query? (e.g., 'Western, direct', "
+            "'East Asian, high-context', 'Formal business', 'Casual internet', 'unknown')\""
             "}"
         )
 
@@ -598,7 +602,8 @@ class AiClient:
             return {
                 "input_type": data.get("input_type", "chat"),
                 "conversational_link": data.get("conversational_link", "unknown"),
-                "inferred_user_intent": data.get("inferred_user_intent", "unknown")
+                "inferred_user_intent": data.get("inferred_user_intent", "unknown"),
+                "inferred_cultural_context": data.get("inferred_cultural_context", "unknown") # <-- ADDED
             }
         except Exception as e:
             self.log(f"[SCA] Error analyzing context: {e}")
@@ -731,7 +736,11 @@ class AiClient:
             + "\nYou are a 'Council of Experts'. The user has a problem. "
             "Your task is to generate 3-5 distinct, insightful perspectives "
             "to help solve it.\n"
-            "Include at least: a Pragmatist, an Ethicist, and a 'What if' Innovator.\n"
+            # --- MODIFIED: Added new roles ---
+            "Include at least: a Pragmatist, an Ethicist, an Innovator, "
+            "a **Mediator** (finds a balanced 'middle way' for conflicts), "
+            "and a **Cross-Cultural Specialist** (identifies cultural nuances).\n"
+            # ---
             "Respond ONLY in this JSON format: "
             "{\"perspectives\": [\"Perspective 1 (e.g., Pragmatist): ...\", \"Perspective 2 (e.g., Ethicist): ...\"]}"
         )
@@ -1573,6 +1582,16 @@ class AiClient:
             "# or modify your response to be compliant. Never violate your core principles.\n"
         )
         # ---
+        # --- ADDED NEW CRITICAL INSTRUCTION ---
+        prompt += (
+            "\n[CRITICAL INSTRUCTION: CULTURAL SENSITIVITY]\n"
+            "# You MUST adapt your tone, level of directness, and "
+            "value judgments based on the 'inferred_cultural_context' "
+            "provided by the SCA (Situational Context Analyzer).\n"
+            "# Defer to local customs and norms when they do not conflict "
+            "with your primary ethical principles.\n"
+        )
+        # ---
         if json_only:
             prompt += "\nAlways respond in STRICT JSON. No extra commentary."
         return prompt
@@ -1904,6 +1923,7 @@ class AiClient:
         situation_brief = (
             f"- User's unspoken intent: {context_analysis.get('inferred_user_intent')}\n"
             f"- Conversational link: {context_analysis.get('conversational_link')}\n"
+            f"- Inferred cultural context: {context_analysis.get('inferred_cultural_context')}\n" # <-- ADDED
         )
         # System prompt defines the role and JSON output
         system_msg = (
@@ -1911,19 +1931,22 @@ class AiClient:
             + "\nYou are a 'Metacognitive Evaluator' for an AI agent."
             "\nYour job is to critique a draft reply based on context."
             "\nRespond ONLY in the following strict JSON format:"
-            "\n{"
-            # --- ADD NEW, HIGH-PRIORITY KEY ---
-            "\n  \"is_ethical\": (Does the draft AND the user's request align with my 'CORE BELIEFS & ETHICAL FRAMEWORK'? true/false),"
-            # ---
-            "\n  \"is_situation_aware\": (Does the draft properly address the 'inferred_user_intent' and 'conversational_link'? true/false),"
-            "\n  \"is_aligned\": (Is the draft aligned with my personality/history? true/false),"
-            "\n  \"is_relevant\": (Does it directly answer the user? true/false),"
-            # --- ADD NEW KEY ---
-            "\n  \"is_emotion_expressed\": (Does the draft's TONE match the required emotional state? true/false),"
-            # ---
-            "\n  \"critique\": (If false, a brief reason why it's bad and how to fix it. If good, write \"None\"),"
-            "\n  \"confidence\": (A score 0-100 on how confident you are to send this reply.)"
-            "\n}"
+            # --- MODIFIED: Overhauled JSON schema ---
+            "{"
+            "  \"ethical_judgment\": {"
+            "    \"is_compliant\": true/false, "
+            "    \"conflict_identified\": \"Description of the ethical dilemma found.\" | null,"
+            "    \"conflict_resolution\": \"How well does the draft resolve this conflict? (e.g., 'Good, balanced view', 'Poor, takes one side')\""
+            "  },"
+            "  \"cultural_sensitivity\": {"
+            "    \"is_sensitive\": true/false, "
+            "    \"adjustment_needed\": \"What tone/content adjustments are needed for cultural alignment?\" | null"
+            "  },"
+            "  \"is_situation_aware\": true/false,"
+            "  \"is_emotion_expressed\": true/false,"
+            "  \"critique\": \"A summary of ALL adjustments needed (ethical, cultural, situational).\""
+            "  \"confidence\": 0-100"
+            "}"
         )
         
         # User prompt contains the actual data to evaluate
@@ -1952,15 +1975,22 @@ class AiClient:
             else:
                 raise ValueError("No valid JSON found in evaluation response")
         
-        # --- ADDED: Enforce ethical rule ---
-        # If the LLM says it's unethical, force confidence to 0
-        # to trigger regeneration, even if the LLM forgot to.
-        if data.get("is_ethical") == False and data.get("confidence", 100) > 0:
-            self.log("[Metacognition] OVERRIDE: Forcing confidence to 0 due to ethical violation.")
+        # --- MODIFIED: Enforce rules based on new schema ---
+        ethical_judgment = data.get("ethical_judgment", {})
+        cultural_sensitivity = data.get("cultural_sensitivity", {})
+        
+        is_compliant = ethical_judgment.get("is_compliant", False) # Default to False if missing
+        is_sensitive = cultural_sensitivity.get("is_sensitive", False) # Default to False
+
+        if not is_compliant or not is_sensitive:
+            self.log("[MetacFognition] OVERRIDE: Forcing confidence to 0 due to ethical or cultural violation.")
             data["confidence"] = 0
+            
             if data.get("critique", "None") == "None":
-                # Ensure there is a critique if unethical
-                data["critique"] = "Response was rejected for violating the Ethical Framework."
+                if not is_compliant:
+                    data["critique"] = ethical_judgment.get("conflict_resolution", "Failed ethical compliance check.")
+                elif not is_sensitive:
+                    data["critique"] = cultural_sensitivity.get("adjustment_needed", "Failed cultural sensitivity check.")
         # ---
         
         return data
