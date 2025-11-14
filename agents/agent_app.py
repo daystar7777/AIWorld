@@ -152,6 +152,50 @@ class EmotionState:
         anxiety_emoji = "😰" if self.anxiety > 0.4 else "😌"
         trust_emoji = "💞" if self.trust_to_user > 0.6 else "🕳️"
         return f"{valence_emoji}{arousal_emoji}{curiosity_emoji}{anxiety_emoji}{trust_emoji}"
+    
+    # --- ADD THIS NEW METHOD ---
+    def get_qualitative_description(self) -> str:
+        """
+        Translates the numerical emotion state into a qualitative,
+        descriptive string for the LLM to understand.
+        """
+        desc = []
+
+        # 1. Valence (Pleasure/Displeasure)
+        if self.valence > 0.6:
+            desc.append("feeling very happy and positive")
+        elif self.valence > 0.2:
+            desc.append("feeling pleasant and content")
+        elif self.valence < -0.6:
+            desc.append("feeling very unhappy and negative")
+        elif self.valence < -0.2:
+            desc.append("feeling a bit down and pessimistic")
+        else:
+            desc.append("feeling neutral")
+
+        # 2. Arousal (Activation)
+        if self.arousal > 0.7:
+            desc.append("and highly energetic and active")
+        elif self.arousal < 0.2:
+            desc.append("and very calm and passive")
+        
+        # 3. Anxiety
+        if self.anxiety > 0.7:
+            desc.append(", but also extremely anxious and worried")
+        elif self.anxiety > 0.4:
+            desc.append(", with some underlying anxiety")
+
+        # 4. Curiosity
+        if self.curiosity > 0.7:
+            desc.append(". You are very curious about the topic")
+        elif self.curiosity < 0.3:
+            desc.append(". You are somewhat bored or uninterested")
+
+        # 5. Trust
+        if self.trust_to_user < 0.3:
+            desc.append(". You feel distrustful of the user")
+
+        return ", ".join(desc) + "."
 
 @dataclass
 class ChatMessage:
@@ -1167,11 +1211,20 @@ class AiClient:
               "}"
         )
 
+        # --- GET QUALITATIVE DESCRIPTION ---
+        emotion_description = current_emotion.get_qualitative_description()
+
         messages = [
             {"role": "system", "content": system_msg},
             {
                 "role": "assistant",
-                "content": f"Agent: {agent_name}\nCurrent emotion: {current_emotion.to_short_str()}\nThread:\n{ctx}",
+                #"content": f"Agent: {agent_name}\nCurrent emotion: {current_emotion.to_short_str()}\nThread:\n{ctx}",
+                "content": (
+                    f"Agent: {agent_name}\n"
+                    # --- USE THE NEW DESCRIPTION INSTEAD OF to_short_str() ---
+                    f"My Current Emotional State: {emotion_description}\n"
+                    f"Thread:\n{ctx}"
+                ),
             },
             {"role": "user", "content": last_user_msg.text},
         ]
@@ -1280,7 +1333,8 @@ class AiClient:
         
         user_prompt = f"""
         [My Context]
-        My current emotion: {current_emotion.to_short_str()}
+        My current personality is in the system prompt.
+        My required emotional state: {emotion_description}
         Conversation history:
         {ctx}
 
@@ -1320,6 +1374,9 @@ class AiClient:
             "\n{"
             "\n  \"is_aligned\": (Is the draft aligned with my personality/history? true/false),"
             "\n  \"is_relevant\": (Does it directly answer the user? true/false),"
+            # --- ADD NEW KEY ---
+            "\n  \"is_emotion_expressed\": (Does the draft's TONE match the required emotional state? true/false),"
+            # ---
             "\n  \"critique\": (If false, a brief reason why it's bad and how to fix it. If good, write \"None\"),"
             "\n  \"confidence\": (A score 0-100 on how confident you are to send this reply.)"
             "\n}"
