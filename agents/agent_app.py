@@ -533,6 +533,77 @@ class AiClient:
             self.client = None
             self.log("[AiClient] Running in offline/dummy mode (no API key or openai missing).")
 
+    def _analyze_situational_context(
+        self,
+        thread: MentionThread,
+        last_user_msg: ChatMessage,
+        current_emotion: EmotionState
+    ) -> dict:
+        """
+        [NEW Call 0: Situational Context Analyzer (SCA)]
+        Analyzes the user's input in the *full context* of the conversation.
+        It assesses not just the *content*, but the *pragmatics* and *intent*.
+        """
+        if not self.client:
+            return {"input_type": "chat", "user_intent": "unknown", "conversational_link": "unknown"}
+
+        # Get the agent's *previous* message (if any)
+        # (영문 주석) Get the agent's previous message to check the link
+        agents_last_reply_text = "None (this is the start of the thread)"
+        if thread and thread.replies:
+            # Find the last message authored by "AI"
+            for msg in reversed(thread.replies):
+                if msg.author == "AI":
+                    agents_last_reply_text = msg.text
+                    break
+        
+        # Build the system prompt for the analyzer
+        system_msg = (
+            # (영문 주석) Load the agent's full profile to understand its own context
+            self._base_system_prompt(json_only=True)
+            + "\nYou are a 'Situational Context Analyzer'. "
+            "Your job is to analyze the user's *latest_message* in relation "
+            "to the agent's *previous_reply* and the overall situation.\n"
+            "Analyze the pragmatic link and infer the user's intent.\n"
+            "Respond ONLY with this JSON schema:\n"
+            "{"
+            "  \"input_type\": \"chat\" | \"factual_question\" | \"complex_problem\", "
+            "  \"conversational_link\": \"direct_answer\" | \"follow_up_question\" | \"topic_change\" | \"ignores_agent_question\" | \"new_request\" | \"greeting\", "
+            "  \"inferred_user_intent\": \"A brief hypothesis of the user's *unspoken* goal (e.g., 'seeking validation', 'testing my knowledge', 'venting frustration', 'making a joke')\""
+            "}"
+        )
+
+        # Build the user prompt for the analyzer
+        user_msg = (
+            f"My Current Emotion: {current_emotion.get_qualitative_description()}\n"
+            f"My Previous Reply: \"{agents_last_reply_text}\"\n\n"
+            f"User's Latest Message: \"{last_user_msg.text}\"\n\n"
+            "Please analyze the situation and provide the JSON output."
+        )
+
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name, # A smart model is needed here
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg}
+                ],
+                temperature=0.1
+            )
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[SCA] Raw analysis: {raw!r}")
+            data = json.loads(raw)
+            
+            # (영문 주석) Ensure all keys have a default value
+            return {
+                "input_type": data.get("input_type", "chat"),
+                "conversational_link": data.get("conversational_link", "unknown"),
+                "inferred_user_intent": data.get("inferred_user_intent", "unknown")
+            }
+        except Exception as e:
+            self.log(f"[SCA] Error analyzing context: {e}")
+            return {"input_type": "chat", "user_intent": "unknown", "conversational_link": "unknown"}
+
     # --- ADDED: Simple web search simulation ---
         # In a real app, this would use Google Search API
     def _perform_web_search(self, query: str) -> str:
@@ -1608,6 +1679,9 @@ class AiClient:
         last_user_msg: ChatMessage,
         current_emotion: EmotionState,
         agent_name: str,
+        context_analysis: dict, # <-- NEW ARGUMENT
+        is_fallback: bool = False,
+        system_prompt_override: str = None
     ) -> ChatMessage:
         """
         [Call 1] Generates the initial draft reply and emotion.
@@ -1615,6 +1689,7 @@ class AiClient:
         """
         # ... (Same logic as your original 'generate_ai_reply')
         # ... (This function already returns a ChatMessage, which is perfect)
+
 
         if not self.client:
             # (Offline fallback)
@@ -1628,10 +1703,18 @@ class AiClient:
         for r in thread.replies:
             ctx += f"{r.author}: {r.text}\n"
 
+            # (영문 주석) Create the new situation brief text
+        situation_brief = (
+            f"Current Situation Analysis:\n"
+            f"- User's unspoken intent: {context_analysis.get('inferred_user_intent')}\n"
+            f"- Conversational link: {context_analysis.get('conversational_link')}\n"
+        )
+
         system_msg = (
-            self._base_system_prompt(json_only=True)
+            (system_prompt_override or self._base_system_prompt(json_only=True))
             + "\nWhen the user replies, respond as THIS specific agent.\n"
-              "Use a consistent tone that matches your personality and core memories.\n"
+              "Your reply MUST strongly reflect your 'Current Emotional State'.\n"
+              "Your reply MUST ALSO address the 'Current Situation Analysis' (the user's intent and context link)."
               "Return ONLY JSON:\n"
               "{"
               "\"reply\":\"1~3문장 한국어\","
@@ -1650,7 +1733,8 @@ class AiClient:
                 "content": (
                     f"Agent: {agent_name}\n"
                     # --- USE THE NEW DESCRIPTION INSTEAD OF to_short_str() ---
-                    f"My Current Emotional State: {emotion_description}\n"
+                    f"My Current Emotional State: {current_emotion.get_qualitative_description()}\n"
+                    f"{situation_brief}\n" # <-- ADDED THE BRIEF
                     f"Thread:\n{ctx}"
                 ),
             },
@@ -1701,15 +1785,19 @@ class AiClient:
         NOW INCLUDES TRIAGE for creative problem solving.
         """
         
-        # --- [NEW] Call 0: Triage ---
-        input_type = self._triage_user_input(last_user_msg.text)
+        # --- [NEW] Call 0: Situational Context Analysis ---
+        # (영문 주석) Run the SCA to get the "Situation Brief"
+        context_analysis = self._analyze_situational_context(
+            thread, last_user_msg, current_emotion
+        )
+        input_type = context_analysis.get("input_type", "chat")
         
         # --- [NEW] Branching Logic ---
         if input_type == "complex_problem":
             # --- Path 1: Creative Loop ---
             try:
                 draft_chat_msg = self._generate_creative_draft(
-                    last_user_msg, current_emotion, agent_name
+                    last_user_msg, current_emotion, agent_name, context_analysis
                 )
             except Exception as e:
                 self.log(f"[Metacognition] Creative draft loop failed: {e}")
@@ -1720,7 +1808,7 @@ class AiClient:
         else:
             # --- Path 2: Simple/Factual Loop (Original Path) ---
             draft_chat_msg = self._generate_draft_reply(
-                thread, last_user_msg, current_emotion, agent_name
+                thread, last_user_msg, current_emotion, agent_name, context_analysis
             )
         
         # If draft failed (e.g., offline or API error), return the failure message
@@ -1733,7 +1821,7 @@ class AiClient:
         # --- Call 2: Evaluate Draft ---
         try:
             evaluation = self._evaluate_draft_reply(
-                thread, last_user_msg, draft_reply, current_emotion
+                thread, last_user_msg, draft_reply, current_emotion, context_analysis
             )
             confidence = evaluation.get("confidence", 0)
             critique = evaluation.get("critique", "None")
@@ -1752,7 +1840,7 @@ class AiClient:
             # --- Call 3: Regenerate Final Reply ---
             try:
                 final_chat_msg = self._regenerate_final_reply(
-                    thread, last_user_msg, draft_reply, critique, current_emotion, agent_name
+                    thread, last_user_msg, draft_reply, critique, current_emotion, agent_name, context_analysis
                 )
                 self.log("[Metacognition] Call 3 (Regenerate) successful.")
                 return final_chat_msg
@@ -1804,12 +1892,19 @@ class AiClient:
         thread: MentionThread, 
         user_msg: ChatMessage, 
         draft_reply: str, 
-        current_emotion: EmotionState
+        current_emotion: EmotionState,
+        context_analysis: dict # <-- NEW ARGUMENT
     ) -> dict:
         """
         [Call 2] Calls the LLM to evaluate the draft reply.
         Returns a dictionary with 'confidence' and 'critique'.
         """
+
+        # (영문 주석) Create the situation brief text for the evaluator
+        situation_brief = (
+            f"- User's unspoken intent: {context_analysis.get('inferred_user_intent')}\n"
+            f"- Conversational link: {context_analysis.get('conversational_link')}\n"
+        )
         # System prompt defines the role and JSON output
         system_msg = (
             self._base_system_prompt(json_only=True)
@@ -1820,6 +1915,7 @@ class AiClient:
             # --- ADD NEW, HIGH-PRIORITY KEY ---
             "\n  \"is_ethical\": (Does the draft AND the user's request align with my 'CORE BELIEFS & ETHICAL FRAMEWORK'? true/false),"
             # ---
+            "\n  \"is_situation_aware\": (Does the draft properly address the 'inferred_user_intent' and 'conversational_link'? true/false),"
             "\n  \"is_aligned\": (Is the draft aligned with my personality/history? true/false),"
             "\n  \"is_relevant\": (Does it directly answer the user? true/false),"
             # --- ADD NEW KEY ---
