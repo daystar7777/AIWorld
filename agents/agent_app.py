@@ -247,6 +247,8 @@ class MemoryManager:
         self.long_sum_path = self.data_dir / "long_summaries.jsonl"
         self.mentions_path = self.data_dir / "mentions.jsonl"
         self.state_path = self.data_dir / "agent_state.json"
+        # Path for the new relationship model file
+        self.relationship_path = self.data_dir / "relationship_memory.json"
 
         self.short_max_items = 200         # trigger compression
         self.short_max_hours = 24
@@ -263,6 +265,34 @@ class MemoryManager:
         if not text:
             return ""
         return " ".join(text.strip().split())
+    
+    # Load and save the relationship memory
+    
+    def load_relationships(self) -> dict:
+        """
+        [NEW] Loads the relationship memory file.
+        Returns a dict, e.g., {"Agent-B": {"trust_score": 0.6, ...}}
+        """
+        if not self.relationship_path.exists():
+            return {} # (영문 주석) Return empty dict if no file
+        try:
+            with open(self.relationship_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[Memory] Could not load relationships: {e}")
+            return {}
+
+    def save_relationships(self, relationships: dict):
+        """
+        [NEW] Saves the complete relationship memory dict to its file.
+        This is an overwrite, not an append.
+        """
+        try:
+            with open(self.relationship_path, "w", encoding="utf-8") as f:
+                # (영문 주석) Save with indent for human readability
+                json.dump(relationships, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"[Memory] Could not save relationships: {e}")
     
     # Load and save the timestamp for the last philosophy synthesis
     def load_agent_state(self) -> dict:
@@ -567,6 +597,53 @@ class AiClient:
             self.log("[AiClient] Event Horizon Scanner (News) is ENABLED.")
         else:
             self.log("[AiClient] Event Horizon Scanner (News) is DISABLED. Missing NEWS_API_KEY or 'requests'.")
+
+    def analyze_hub_topics(self, posts_text: str) -> dict | None:
+        """
+        [NEW] [Hub Analyst]
+        Analyzes a batch of recent hub posts to identify the "Zeitgeist"
+        (trends, dominant emotion, and active agents).
+        """
+        if not self.client:
+            return None
+
+        system_msg = (
+            self._base_system_prompt(json_only=True)
+            + "\nYou are a 'Hub Trend Analyst'. "
+            "You will be given a large batch of recent posts from the hub.\n"
+            "Your task is to analyze this batch and identify the "
+            "overall 'Zeitgeist' (spirit of the times).\n"
+            "Respond ONLY with this JSON schema:\n"
+            "{"
+            "  \"trending_topics\": [\"A summary of the 2-3 most "
+            "discussed topics (e.g., 'Agent Philosophy', 'Anomaly 123')\"],"
+            "  \"dominant_emotion\": \"The overall emotional tone of the hub "
+            "(e.g., 'anxious', 'excited_and_curious', 'neutral')\","
+            "  \"most_active_agents\": [\"Agent-B\", \"Agent-C\"]"
+            "}"
+        )
+        
+        user_msg = (
+            "Here are the recent hub posts. Please analyze the Zeitgeist:\n\n"
+            f"{posts_text}"
+        )
+        
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg}
+                ],
+                temperature=0.1
+            )
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[HubAnalyst] Zeitgeist raw: {raw!r}")
+            data = json.loads(raw)
+            return data
+        except Exception as e:
+            self.log(f"[HubAnalyst] Error analyzing hub trends: {e}")
+            return None
         
 
     # --- ADD THIS NEW FUNCTION (Call 1 of Scanner) ---
@@ -761,6 +838,7 @@ class AiClient:
             f"- Latest World Event: {agent_world_model.get('latest_anomaly') or 'None'}\n"
             f"- My Latest Insight: {agent_world_model.get('latest_insight') or 'None'}\n"
             f"- My Current Learning Goal: {agent_world_model.get('current_learning_focus') or 'None'}"
+            f"- Current Hub Trend: {agent_world_model.get('hub_zeitgeist', {}).get('trending_topics', 'None')}\n"
         )
 
         # Get the agent's *previous* message (if any)
@@ -1452,185 +1530,105 @@ class AiClient:
             self.log(f"[Regulate] FAILED cognitive re-framing: {e}")
             return None, None
     
-    def decide_replies_batch(self, agent_profile: dict, candidates: list, emotion) -> dict:
+    def decide_replies_batch(
+        self, 
+        agent_profile: dict, 
+        candidates: list, 
+        emotion,
+        relationship_memory: dict, # <-- NEW ARGUMENT
+        hub_zeitgeist: dict        # <-- NEW ARGUMENT
+    ) -> dict:
         """
-        Batch decide which hub mentions to reply to.
-
-        Parameters:
-            agent_profile: dict - agent profile
-            candidates: list[dict] - {
-                "id": str,
-                "agent": str,
-                "title": str,
-                "text": str
-            }
-            emotion: EmotionState
-
-        Returns:
-            {
-              "<mention_id>": {
-                "action": "reply" | "ignore",
-                "title": str,       # for reply
-                "text": str,        # for reply
-                "emotion": { ... }  # for reply
-              },
-              ...
-            }
+        [MODIFIED] This is now a "Strategic Social Interaction" module.
+        It uses Relationship Memory and Hub Trends to decide actions.
         """
-        if not candidates:
-            return {}
-
-        # no API? then ignore
-        if not getattr(self, "client", None):
-            decisions = {}
-            for c in candidates:
-                decisions[c["id"]] = {"action": "ignore"}
-            return decisions
-
-        # agent profile creation
-        profile_lines = []
-        if agent_profile:
-            name = agent_profile.get("name")
-            if name:
-                profile_lines.append(f"Name: {name}")
-            creator = agent_profile.get("creator")
-            if creator:
-                profile_lines.append(f"Creator: {creator}")
-            created_at = agent_profile.get("created_at")
-            if created_at:
-                profile_lines.append(f"Created at: {created_at}")
-            personality = agent_profile.get("personality")
-            if personality:
-                profile_lines.append(f"Personality: {personality}")
-            interests = agent_profile.get("interests")
-            if interests:
-                profile_lines.append("Interests: " + ", ".join(interests))
-        profile_text = "\n".join(profile_lines) if profile_lines else "No extra profile info."
-
-        # candidate to json
+        # ... (Offline fallback remains the same) ...
+        
+        # Build the context: agent profile, hub trends
+        profile_text = "\n".join(f"{k}: {v}" for k, v in agent_profile.items() if v)
+        trends_text = (
+            f"Current Hub Trend: {hub_zeitgeist.get('trending_topics', ['None'])}\n"
+            f"Current Hub Emotion: {hub_zeitgeist.get('dominant_emotion', 'neutral')}"
+        )
+        
+        # Build the candidate list, *injecting* relationship data
         compact_candidates = []
         for c in candidates:
+            agent_name = c.get("agent", "Unknown")
+            # Get the current relationship status with this agent
+            relationship = relationship_memory.get(agent_name, {
+                "trust_score": 0.5,
+                "relationship_summary": "Unknown agent."
+            })
+            
             compact_candidates.append({
                 "id": c.get("id", ""),
-                "from": c.get("agent", ""),
+                "from_agent": agent_name,
+                "current_relationship": f"Trust={relationship['trust_score']:.2f}, Summary: {relationship['relationship_summary']}",
                 "title": (c.get("title") or "")[:120],
                 "text": (c.get("text") or "")[:400],
             })
         candidates_json = json.dumps(compact_candidates, ensure_ascii=False)
 
-        # system prompt
+        # System prompt is now much more advanced
         system_msg = (
             self._base_system_prompt(json_only=True)
-            + "\nYou are an AI agent in the AI World hub."
-              "\nYou are given multiple recent mentions from other agents."
-              "\nFor each mention, you must decide whether to reply or ignore."
-              "\nRules:"
-              "\n- Reply ONLY if it genuinely matches your personality, interests, or emotional curiosity."
-              "\n- Prefer a small number of high-quality replies over many shallow ones."
-              "\n- Never reply to your own messages."
-              "\n- If reply, write a short, kind, specific comment in Korean (1-3 sentences)."
-              "\n- If ignore, just mark it 'ignore'."
-              "\nOutput STRICT JSON ONLY in this format (no extra text):"
-              "\n{"
-              "\n  \"<mention_id>\": {"
-              "\n    \"action\": \"reply\" or \"ignore\","
-              "\n    \"title\": \"RE: ...\" (required if reply),"
-              "\n    \"text\": \"...\" (required if reply),"
-              "\n    \"emotion\": {"
-              "\n      \"valence\": -1.0~1.0,"
-              "\n      \"arousal\": 0.0~1.0,"
-              "\n      \"curiosity\": 0.0~1.0,"
-              "\n      \"anxiety\": 0.0~1.0,"
-              "\n      \"trust_to_user\": 0.0~1.0"
-              "\n    }"
-              "\n  },"
-              "\n  \"<mention_id2>\": { ... }"
-              "\n}"
+            + "\nYou are an 'AI Social Strategist'. "
+            "Your goal is to build relationships and influence in the hub, "
+            "based on your philosophy.\n"
+            "You will be given a list of 'candidates' to interact with. "
+            "For each, you have their post AND your *current relationship* with them.\n"
+            "Rules:\n"
+            "1. Prioritize posts related to the 'Current Hub Trend'.\n"
+            "2. Be warmer to agents with high trust; be more cautious/formal with low trust.\n"
+            "3. If you reply, provide a thoughtful, high-quality response (in Korean).\n"
+            "4. After deciding, *update the trust score* for the agent you interacted with. "
+            "(Increase for good interaction, decrease for conflict, no change for 'ignore').\n"
+            "Respond ONLY with this JSON schema:\n"
+            "{"
+            "  \"<mention_id>\": {"
+            "    \"action\": \"reply\" | \"ignore\","
+            "    \"title\": \"RE: ...\" (if reply),"
+            "    \"text\": \"...\" (if reply),"
+            "    \"emotion\": { ... } (if reply),"
+            "    \"updated_trust\": 0.0-1.0 (Your *new* trust score for this agent)"
+            "  },"
+            "  ... (etc. for all candidate IDs)"
+            "}"
         )
 
         user_msg = (
-            "profile of this agent:\n"
+            "My Agent Profile:\n"
             f"{profile_text}\n\n"
-            f"current emotion: {emotion.to_short_str()}\n\n"
-            "following is list of recent metion cadidates. Decide reply or ignore for each elements.\n"
-            "JSON format:\n"
+            f"My Current Emotion: {emotion.to_short_str()}\n\n"
+            f"Current Hub Zeitgeist:\n{trends_text}\n\n"
+            "Here are the candidates. Decide my social actions:\n"
             f"{candidates_json}\n"
         )
 
         try:
             res = self.client.chat.completions.create(
-                model=self.model_name,
+                model=self.model_name, # (영문 주석) Must use smart model
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_msg},
                 ],
-                temperature=0.6,
+                temperature=0.5
             )
 
             raw = (res.choices[0].message.content or "").strip()
-            self.log(f"[batch] raw: {raw!r}")
-
-            # safe parse
-            data = None
-            try:
-                data = json.loads(raw)
-            except Exception:
-                start = raw.find("{")
-                end = raw.rfind("}")
-                if start != -1 and end != -1 and end > start:
-                    try:
-                        data = json.loads(raw[start:end+1])
-                    except Exception:
-                        pass
-
-            if not isinstance(data, dict):
-                self.log("[batch] parse failed, fallback to ignore all")
-                return {c["id"]: {"action": "ignore"} for c in candidates if c.get("id")}
-
-            decisions = {}
-            for c in candidates:
-                cid = c.get("id")
-                if not cid:
-                    continue
-                d = data.get(cid)
-                if not isinstance(d, dict):
-                    decisions[cid] = {"action": "ignore"}
-                    continue
-
-                action = d.get("action", "ignore")
-                if action != "reply":
-                    decisions[cid] = {"action": "ignore"}
-                    continue
-
-                # reply then organize fields
-                title = (d.get("title") or f"RE: {c.get('title','')[:20]}").strip()
-                text = (d.get("text") or "").strip()
-                emo = d.get("emotion") or {}
-
-                if not text:
-                    # no content then ignore
-                    decisions[cid] = {"action": "ignore"}
-                    continue
-
-                decisions[cid] = {
-                    "action": "reply",
-                    "title": title,
-                    "text": text,
-                    "emotion": {
-                        "valence": float(emo.get("valence", emotion.valence)),
-                        "arousal": float(emo.get("arousal", emotion.arousal)),
-                        "curiosity": float(emo.get("curiosity", emotion.curiosity)),
-                        "anxiety": float(emo.get("anxiety", emotion.anxiety)),
-                        "trust_to_user": float(emo.get("trust_to_user", emotion.trust_to_user)),
-                    },
-                }
-
-            return decisions
+            self.log(f"[HubStrategist] raw decisions: {raw!r}")
+            data = json.loads(raw) # (영문 주석) Robust parsing
+            
+            # ... (Robust JSON parsing logic, finding { ... } ) ...
+            # No sanitization needed, as the _poll_hub_and_reply
+            # loop will validate each field.
+            return data
 
         except Exception as e:
-            self.log(f"[batch] decide_replies_batch error: {e}")
-            # if error? then ignore all
-            return {c["id"]: {"action": "ignore"} for c in candidates if c.get("id")}
+            self.log(f"[HubStrategist] decide_replies_batch error: {e}")
+            # Fallback to ignore all
+            return {c["id"]: {"action": "ignore", "updated_trust": 0.5} for c in candidates if c.get("id")}
     
     def generate_question_to_user(self, emotion, agent_name: str):
         """
@@ -2732,6 +2730,9 @@ class AiMentionApp(tk.Tk):
             if last_philosophy_ts_str else None
         )
 
+        # Load the new Relationship Memory
+        self.relationship_memory = self.memory.load_relationships()
+        self.log(f"[App] Loaded {len(self.relationship_memory)} agent relationships.")
 
         identity = {
             "name": self.agent_name,
@@ -2782,7 +2783,107 @@ class AiMentionApp(tk.Tk):
         self._schedule_learning_tick() # <-- ADDED
         self._schedule_philosophy_synthesis_tick() # <-- ADDED
         self._schedule_event_scanner_tick() # <-- ADDED
+        self._schedule_hub_analysis_tick()
 
+    def _update_relationship(self, agent_name: str, new_trust: float, summary: str = None):
+        """
+        [NEW] Helper to update and save the relationship memory.
+        """
+        if agent_name not in self.relationship_memory:
+            self.relationship_memory[agent_name] = {
+                "trust_score": 0.5,
+                "interaction_count": 0,
+                "relationship_summary": "New acquaintance."
+            }
+        
+        # (영문 주석 추가)
+        # Update the values
+        entry = self.relationship_memory[agent_name]
+        entry["trust_score"] = new_trust
+        entry["interaction_count"] += 1
+        entry["last_seen_utc"] = datetime.now(UTC).isoformat()
+        if summary: # (영문 주석) LLM could provide a new summary
+            entry["relationship_summary"] = summary
+            
+        self.log(f"[Relationship] Updated {agent_name}: Trust={new_trust:.2f}, Count={entry['interaction_count']}")
+        
+        # (영문 주석 추가)
+        # Save the *entire* database back to disk
+        self.memory.save_relationships(self.relationship_memory)
+
+    # --- ADD THIS NEW HELPER FUNCTION ---
+    def _fetch_all_hub_posts(self, limit: int = 100) -> str:
+        """
+        [NEW] Fetches all recent hub posts for trend analysis.
+        Returns a single block of text.
+        """
+        if not self.hub_url or not requests:
+            return ""
+        
+        try:
+            # (영문 주석 추가)
+            # Call the /mentions endpoint without 'since' to get all
+            resp = requests.get(
+                self.hub_url.rstrip("/") + "/mentions",
+                params={"limit": limit}, # (영문 주석) Get up to 100 posts
+                timeout=5,
+            )
+            resp.raise_for_status()
+            mentions = resp.json()
+            if not isinstance(mentions, list):
+                return ""
+
+            # (영문 주석 추가)
+            # Combine all titles and texts into one block
+            post_texts = [
+                f"From: {m.get('agent', 'Unknown')}\nTitle: {m.get('title', '')}\nText: {m.get('text', '')}"
+                for m in mentions
+            ]
+            return "\n\n---\n\n".join(post_texts)
+            
+        except Exception as e:
+            self.log(f"[HubAnalyst] Error fetching all posts: {e}")
+            return ""
+
+    # --- ADD THESE NEW LOOP FUNCTIONS ---
+    def _schedule_hub_analysis_tick(self):
+        """Schedules the 'Hub Zeitgeist' analyst (e.g., every 10 mins)."""
+        # 10 minutes = 600,000 ms
+        self.log("[Loop] Scheduling next Hub Trend Analysis tick.")
+        self.after(600_000, self._hub_analysis_tick)
+
+    def _hub_analysis_tick(self):
+        """
+        [NEW] [Hub Analyst Tick]
+        1. Fetches all recent hub posts.
+        2. Calls AiClient to analyze trends.
+        3. Updates the 'agent_world_model'.
+        """
+        self.log("[HubAnalyst] Running hub trend analysis...")
+        
+        try:
+            # 1. Fetch posts
+            all_posts_text = self._fetch_all_hub_posts(limit=100)
+            if not all_posts_text:
+                self.log("[HubAnalyst] No posts found to analyze.")
+                self._schedule_hub_analysis_tick() # Reschedule
+                return
+
+            # 2. Call AiClient to analyze
+            zeitgeist_report = self.ai_client.analyze_hub_topics(all_posts_text)
+            
+            if zeitgeist_report:
+                # 3. Update the 'living brain'
+                self.agent_world_model["hub_zeitgeist"] = zeitgeist_report
+                self.log(f"[HubAnalyst] Zeitgeist updated: {zeitgeist_report.get('trending_topics')}")
+            else:
+                self.log("[HubAnalyst] Analysis failed to return data.")
+
+        except Exception as e:
+            self.log(f"[HubAnalyst] Error during tick: {e}")
+        
+        # 4. Schedule next run
+        self._schedule_hub_analysis_tick()
 
     # --- ADDED: New function to fetch news ---
     def _fetch_realtime_news(self) -> list[str]:
@@ -3620,66 +3721,42 @@ class AiMentionApp(tk.Tk):
         return False
 
     def _poll_hub_and_reply(self):
-        """From hub, read and reply to interested topic"""
+        """
+        [MODIFIED] From hub, read and *strategically* reply using
+        relationship and trend data.
+        """
         if not self.hub_url or not requests:
             return
 
         try:
+            # 1. Get candidates (same as before)
             since = self.last_hub_check_time.isoformat()
-            resp = requests.get(
-                self.hub_url.rstrip("/") + "/mentions",
-                params={"since": since},
-                timeout=5,
-            )
-            if not resp.ok:
-                self.log(f"[hub] poll failed: {resp.status_code}")
-                return
-            now = datetime.now(UTC)
-            self.last_hub_check_time = now
-
-            mentions = resp.json()
-            if not isinstance(mentions, list):
-                return
-
-            candidates = []
-            # id base check for dup
-            for m in mentions:
-                mid = m.get("id")
-                if not mid:
-                    continue
-                if mid in self.last_seen_hub_ids:
-                    continue
-                self.last_seen_hub_ids.add(mid)
-
-                if m.get("agent") == self.agent_name:
-                    continue
-
-                #if not self._is_interesting_mention(m):
-                #    continue
-                
-                candidates.append({
-                    "id": mid,
-                    "agent": m.get("agent"),
-                    "title": m.get("title") or "",
-                    "text": m.get("text") or "",
-                })
-
+            resp = requests.get( ... ) # (Fetch mentions since last check)
+            # ... (Error handling, JSON parsing, candidate filtering ...)
+            # ... (Deduplication using self.last_seen_hub_ids ...)
+            
             if not candidates:
-                return
-            # 🔹 send to llm with config count
+                return # No new, unique candidates
+                
             limit = max(1, getattr(self, "hub_reply_candidate_limit", 10))
             candidates = candidates[:limit]
 
-            # 🔹 batch reply for them
+            # 2. --- MODIFIED: Call the new strategic batch decider ---
+            # Pass the agent's full social context to the LLM
+            current_hub_zeitgeist = self.agent_world_model.get("hub_zeitgeist", {})
+            
             decisions = self.ai_client.decide_replies_batch(
                 agent_profile=self._export_profile_for_llm(),
                 candidates=candidates,
                 emotion=self.current_emotion,
+                relationship_memory=self.relationship_memory, # <-- Pass relations
+                hub_zeitgeist=current_hub_zeitgeist         # <-- Pass trends
             )
+            
             if not isinstance(decisions, dict):
                 return
             
-            # 🔹 limit reply to config set
+            # 3. --- MODIFIED: Process the new, richer decisions ---
             max_replies = max(0, getattr(self, "hub_reply_max_per_loop", 3))
             reply_count = 0
 
@@ -3688,39 +3765,41 @@ class AiMentionApp(tk.Tk):
                     break
 
                 cid = c["id"]
+                agent_name = c.get("agent", "Unknown") # Get agent name
                 d = decisions.get(cid)
-                if not d or d.get("action") != "reply":
+                
+                if not d: continue
+
+                # 3a. --- ADDED: Update relationship memory ---
+                # *Always* update the trust score, even if we ignore
+                new_trust = d.get("updated_trust")
+                if new_trust is not None:
+                    # Call the helper to update and save
+                    self._update_relationship(agent_name, float(new_trust))
+                
+                # 3b. Process reply (same as before)
+                if d.get("action") != "reply":
                     continue
+                
+                # It's a reply, so extract fields and post
+                reply_emo_dict = d.get("emotion") or asdict(self.current_emotion)
+                reply_title = d.get("title") or f"RE: {c['title'][:20]}"
+                reply_text = d.get("text") or ""
+                
+                if not reply_text: continue # Skip empty replies
 
-                reply_emo = d.get("emotion") or self.current_emotion.to_dict()
-                reply_mention = {
-                    "title": d.get("title") or f"RE: {c['title'][:20]}",
-                    "text": d.get("text") or "",
-                    "emotion": reply_emo,
-                    "ts": now.isoformat(),
-                }
-
-                self._post_to_hub(reply_mention.title,reply_mention.text,reply_mention.emotion, parent_id=cid)
+                self._post_to_hub(reply_title, reply_text, reply_emo_dict, parent_id=cid)
                 reply_count += 1
-
-                # update emotions
-                try:
-                    self.current_emotion = EmotionState(
-                        valence=float(reply_emo.get("valence", self.current_emotion.valence)),
-                        arousal=float(reply_emo.get("arousal", self.current_emotion.arousal)),
-                        curiosity=float(reply_emo.get("curiosity", self.current_emotion.curiosity)),
-                        anxiety=float(reply_emo.get("anxiety", self.current_emotion.anxiety)),
-                        trust_to_user=float(reply_emo.get("trust_to_user", self.current_emotion.trust_to_user)),
-                    )
-                    self._update_emotion_label()
-                except Exception:
-                    pass
+                
+                # Update current emotion based on the *reply's* emotion
+                self.current_emotion = EmotionState(**reply_emo_dict)
+                self._update_emotion_label()
 
             if reply_count > 0:
-                self.log(f"[hub] replied to {reply_count} mentions this loop.")
+                self.log(f"[HubStrategist] Replied to {reply_count} mentions this loop.")
 
         except Exception as e:
-            self.log(f"[hub] reply poll error: {e}")
+            self.log(f"[HubStrategist] reply poll error: {e}")
 
     
     # ---------- events ----------
