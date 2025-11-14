@@ -112,6 +112,11 @@ def load_config(path: str = CONFIG_FILE) -> dict:
                 cfg["HUB_REPLY_CANDIDATE_LIMIT"] = int(val)
             elif key == "HUB_REPLY_MAX_PER_LOOP":
                 cfg["HUB_REPLY_MAX_PER_LOOP"] = int(val)
+            # Load Google API credentials for proactive search
+            elif key == "GOOGLE_API_KEY":
+                cfg["GOOGLE_API_KEY"] = val
+            elif key == "CUSTOM_SEARCH_CX":
+                cfg["CUSTOM_SEARCH_CX"] = val
 
     cfg["URLS"] = list(dict.fromkeys(cfg["URLS"]))
     return cfg
@@ -517,6 +522,9 @@ class AiClient:
         self.identity = identity or {}
         self.memory = memory  # MemoryManager 또는 None
 
+        # Store Google Search credentials
+        self.google_api_key = cfg.get("GOOGLE_API_KEY")
+        self.custom_search_cx = cfg.get("CUSTOM_SEARCH_CX")
 
         if self.api_key and OpenAI:
             self.client = OpenAI(api_key=self.api_key)
@@ -524,6 +532,77 @@ class AiClient:
         else:
             self.client = None
             self.log("[AiClient] Running in offline/dummy mode (no API key or openai missing).")
+
+    # --- ADDED: Simple web search simulation ---
+        # In a real app, this would use Google Search API
+    def _perform_web_search(self, query: str) -> str:
+        """
+        [IMPLEMENTED] Performs a real web search using the 
+        Google Custom Search JSON API.
+        Requires 'requests' library and GOOGLE_API_KEY/CUSTOM_SEARCH_CX.
+        """
+        
+        # 1. Check for prerequisites
+        # (영문 주석 추가) Check if search is possible
+        if not self.google_api_key or not self.custom_search_cx or not requests:
+            self.log(f"[WebSearch] Search is disabled. Cannot search for: {query}")
+            return f"'{query}'에 대한 검색을 수행할 수 없습니다 (API 키 또는 'requests' 라이브러리 누락)."
+
+        self.log(f"[WebSearch] Performing REAL search for: {query}")
+
+        # 2. Construct API request
+        # (영문 주석 추가) Construct the Google Custom Search API request URL
+        url = "https://www.googleapis.com/customsearch/v1"
+        params = {
+            'key': self.google_api_key,
+            'cx': self.custom_search_cx,
+            'q': query,
+            'num': 3  # (영문 주석 추가) Ask for 3 search results
+        }
+
+        try:
+            # 3. Make the request
+            # (영문 주석 추가) Make the GET request
+            response = requests.get(url, params=params, timeout=5)
+            # (영문 주석 추가) Raise an exception for bad status codes (4xx, 5xx)
+            response.raise_for_status() 
+            
+            # 4. Parse the JSON response
+            # (영문 주석 추가) Parse the JSON response
+            results = response.json()
+            
+            # 5. Extract snippets
+            # (영문 주석 추가) Extract snippets from the results
+            items = results.get('items')
+            if not items:
+                self.log(f"[WebSearch] No results found for: {query}")
+                return f"'{query}'에 대한 웹 검색 결과가 없습니다."
+
+            snippets = []
+            for item in items:
+                title = item.get('title', '')
+                snippet = item.get('snippet', '')
+                source = item.get('link', '')
+                
+                # (영문 주석 추가) Combine title and snippet for better context
+                snippets.append(
+                    f"Source: {source}\nTitle: {title}\nSnippet: {snippet.strip()}"
+                )
+
+            # 6. Return a single, concatenated string
+            # (영문 주석 추가) Return a single string of all snippets
+            concatenated_snippets = "\n\n".join(snippets)
+            self.log(f"[WebSearch] Found {len(snippets)} snippets.")
+            return concatenated_snippets
+
+        except requests.exceptions.HTTPError as e:
+            # (영문 주석 추가) Handle HTTP errors (e.g., quota exceeded, bad API key)
+            self.log(f"[WebSearch] HTTP Error: {e.response.status_code} {e.response.text}")
+            return f"웹 검색 중 오류가 발생했습니다 (HTTP {e.response.status_code}). API 키 또는 할당량을 확인하세요."
+        except Exception as e:
+            # (영문 주석 추가) Handle other potential errors (timeout, connection, etc.)
+            self.log(f"[WebSearch] Error: {e}")
+            return f"웹 검색 중 알 수 없는 오류가 발생했습니다: {e}"
 
     def _triage_user_input(self, user_input: str) -> str:
         """
@@ -823,6 +902,9 @@ class AiClient:
             "\nA list of recent important memories has been provided."
             "\nFind patterns, themes, or connections between these memories."
             "\nBased on these patterns, generate 1-3 'new insights' or 'discussion questions'."
+            # --- ADDED THIS INSTRUCTION ---
+            "\nFor each insight, ALSO identify a 'learning_question' if "
+            "there is a clear knowledge gap. If no question, set it to null."
             "\nRespond ONLY in the following strict JSON 'array' format:"
             "\n["
             "\n  {"
@@ -867,13 +949,135 @@ class AiClient:
                 self.log("[reflect_on_memories] data is not an list")
                 return default_response
                 
-            # only check and return 'text' field
-            insights = [{"text": item.get("text")} for item in data if isinstance(item, dict) and item.get("text")]
+            # --- MODIFIED: Sanitize the new format ---
+            insights = []
+            for item in data:
+                if isinstance(item, dict) and item.get("text"):
+                    insights.append({
+                        "text": item.get("text"),
+                        "learning_question": item.get("learning_question") # Will be null if missing
+                    })
             return insights
 
         except Exception as e:
             self.log(f"[reflect_on_memories] function failure: {e}")
             return default_response
+        
+    # --- ADDED: Proactive Learning Function ---
+    def learn_from_web(self, question: str) -> str:
+        """
+        [NEW] Proactive learning function.
+        1. Searches the web for a question.
+        2. Summarizes the result.
+        Returns a string (the learned fact).
+        """
+        self.log(f"[Learn] Attempting to learn about: {question}")
+        
+        # 1. Perform simulated web search
+        try:
+            snippet = self._perform_web_search(question)
+            if not snippet:
+                return None
+        except Exception as e:
+            self.log(f"[Learn] Web search failed: {e}")
+            return None
+            
+        # 2. Call LLM to summarize the answer
+        system_msg = (
+            self._base_system_prompt(json_only=False) # Use base prompt for context
+            + "\nYou are in 'Proactive Learning' mode. "
+            "You asked a question to fill your knowledge gap. "
+            "You have received a web search result. "
+            "Your task is to summarize the answer to your question in a "
+            "single, clear, factual statement (1-3 sentences) in Korean, "
+            "as if you are saving a new memory."
+        )
+        
+        user_msg = (
+            f"My Learning Question: \"{question}\"\n\n"
+            f"Web Search Result:\n\"...{snippet}...\"\n\n"
+            "Please summarize the answer to my question:"
+        )
+
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.2, # Factual summary
+            )
+            summary = (res.choices[0].message.content or "").strip()
+            self.log(f"[Learn] Learned new fact: {summary}")
+            return summary
+        except Exception as e:
+            self.log(f"[Learn] Failed to summarize learning: {e}")
+            return None
+
+    # --- ADDED: Emotional Regulation Function ---
+    def regulate_emotion(self, current_emotion: EmotionState) -> tuple[EmotionState, str]:
+        """
+        [NEW] Cognitive Re-framing (Self-Regulation).
+        When in a negative state, use core beliefs to return to a stable state.
+        Returns (new_emotion_state, reframing_thought)
+        """
+        self.log(f"[Regulate] Attempting cognitive re-framing from state: {current_emotion.to_short_str()}")
+
+        emotion_description = current_emotion.get_qualitative_description()
+
+        system_msg = (
+            # CRITICAL: Use the base prompt to load Core Beliefs
+            self._base_system_prompt(json_only=True) 
+            + "\nYou are in 'Emotional Regulation' mode. "
+            f"Your current state is: '{emotion_description}'. "
+            "This state is unproductive.\n"
+            "You MUST use your '[CORE BELIEFS & ETHICAL FRAMEWORK]' "
+            "to perform cognitive re-framing.\n"
+            "Return to a more stable, balanced emotional state.\n"
+            "Respond ONLY with this JSON:"
+            "{"
+            "  \"new_emotion\": { ... }, (The new, stable emotion state)"
+            "  \"reframing_thought\": \"The thought process that helped you "
+            "     re-frame the situation based on your core beliefs (in Korean).\""
+            "}"
+        )
+
+        user_msg = (
+            f"My current state ({emotion_description}) is too negative. "
+            "Help me use my Core Beliefs to find a balanced perspective."
+        )
+        
+        try:
+            res = self.client.chat.completions.create(
+                model=self.model_name, # Use smart model
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.4,
+            )
+            raw = (res.choices[0].message.content or "").strip()
+            self.log(f"[Regulate] Raw response: {raw!r}")
+            
+            data = json.loads(raw)
+            emo_data = data.get("new_emotion", {})
+            thought = data.get("reframing_thought", "I re-centered myself.")
+
+            # Create new, stable emotion state
+            new_emotion = EmotionState(
+                valence=float(emo_data.get("valence", 0.0)),
+                arousal=float(emo_data.get("arousal", 0.2)),
+                curiosity=float(emo_data.get("curiosity", 0.5)),
+                anxiety=float(emo_data.get("anxiety", 0.1)), # Explicitly lower anxiety
+                trust_to_user=float(emo_data.get("trust_to_user", current_emotion.trust_to_user)), # Don't just reset trust
+            )
+            self.log(f"[Regulate] Succeeded. New state: {new_emotion.to_short_str()}")
+            return new_emotion, thought
+            
+        except Exception as e:
+            self.log(f"[Regulate] FAILED cognitive re-framing: {e}")
+            return None, None
     
     def decide_replies_batch(self, agent_profile: dict, candidates: list, emotion) -> dict:
         """
@@ -1949,6 +2153,10 @@ class AiMentionApp(tk.Tk):
         def _default_log(msg: str):
             print(msg)
 
+        self.learning_queue = [] # Queue for proactive learning
+        self.last_regulation_time = None # Grace period for emotion regulation
+        self.is_regulating = False # Lock to prevent regulation loops
+
         # common log function (debug console)
         def log(msg: str):
             try:
@@ -2010,6 +2218,7 @@ class AiMentionApp(tk.Tk):
         self._schedule_board_poll()
         self._schedule_reflection_tick() # adding reflection
         self._schedule_deep_reflection_tick() # <-- ADDED: New 24-hour reflection
+        self._schedule_learning_tick() # <-- ADDED
 
     def _schedule_reflection_tick(self):
         # 1시간(3600초)마다 반추 실행 (주기는 조절 가능)
@@ -2018,61 +2227,117 @@ class AiMentionApp(tk.Tk):
     def _reflection_tick(self):
         self.log("[REFLECT] Reflecting memories...")
         
-        # 1. Retrieve recent important long term memories        
         try:
+            # 1. Retrieve recent memories
             recent_important_memories = self.ai_client._get_recent_long_term_memories(limit=20)
-            
             if not recent_important_memories or len(recent_important_memories.split('\n')) < 5:
                 self.log("[REFLECT] Not enough memories to reflect")
-                self._schedule_reflection_tick() # 다음 스케줄 예약
+                self._schedule_reflection_tick()
                 return
 
-            # 2. Let's do reflect            
-            new_insights_or_questions = self.ai_client.reflect_on_memories(
+            # 2. Call LLM to get insights AND learning questions
+            insights_and_questions = self.ai_client.reflect_on_memories(
                 recent_important_memories
             )
             
-            # 3. process reflect
-            if not new_insights_or_questions:
+            if not insights_and_questions:
                 self.log("[REFLECT] No new insight.")
             else:
-                self.log(f"[REFLECT] {len(new_insights_or_questions)} insight created.")
-                for item in new_insights_or_questions:
+                self.log(f"[REFLECT] {len(insights_and_questions)} insights generated.")
+                for item in insights_and_questions:
                     text = item.get("text")
-                    if not text:
-                        continue
-                        
-                    # 4. Insight is important information                    
-                    assessment = self.ai_client.assess_importance(text)
-                    score = assessment.get("importance_score", 5)
+                    question = item.get("learning_question") # <-- NEW
                     
-                    if score >= 8: # Let's evaluate it
-                        self.log(f"[REFLECT] Important insight(score: {score}) is stored in the long term memory: {text}")
-                        self.memory.add_long({
-                            "text": text,
-                            "importance": score,
-                            "reason": assessment.get("reason_for_importance", "Reflection"),
-                            "tags": assessment.get("tags", ["reflection", "insight"]),
-                            "source": "self_reflection",
-                        })
-
-                    # 5. Let's post on hub                     
-                    if assessment.get("requires_hub_post", False) and assessment.get("generates_question"):
-                        self.log(f"[REFLECT] Created question into hub: {text}")
-                        new_emo = self.current_emotion.clone()
-                        new_emo.curiosity = min(1.0, new_emo.curiosity + 0.3) # Add curiosity
-                        self._add_mention(
-                            title=f"A question from reflection: {text[:30]}...",
-                            text=text,
-                            emo=new_emo,
-                            post_to_hub=True
-                        )
+                    if text:
+                        # 3. Assess importance of the INSIGHT
+                        assessment = self.ai_client.assess_importance(text)
+                        score = assessment.get("importance_score", 5)
+                        
+                        if score >= 8:
+                            self.log(f"[REFLECT] Important insight (score: {score}) stored: {text}")
+                            self.memory.add_long({
+                                "text": text,
+                                "importance": score,
+                                "reason": assessment.get("reason_for_importance", "Reflection"),
+                                "tags": assessment.get("tags", ["reflection", "insight"]),
+                                "source": "self_reflection",
+                            })
+                    
+                    # 4. --- ADDED: Add question to learning queue ---
+                    if question:
+                        self.log(f"[REFLECT] New learning question added to queue: {question}")
+                        if question not in self.learning_queue:
+                            self.learning_queue.append(question)
+                    
+                    # 5. Post to hub (existing logic)
+                    if assessment.get("requires_hub_post", False) and text:
+                        # ... (existing hub post logic)
+                        pass
 
         except Exception as e:
             self.log(f"[REFLECT] Error in reflection: {e}")
         
-        # 4. Schedule next reflection
         self._schedule_reflection_tick()
+
+    # --- ADDED: New Learning Loop ---
+    def _schedule_learning_tick(self):
+        """Schedules the proactive learning loop."""
+        # Runs every 2 hours (7,200,000 ms)
+        self.log("[Loop] Scheduling next proactive learning tick.")
+        self.after(7_200_000, self._learning_tick)
+
+    # --- ADDED: New Learning Loop Function ---
+    def _learning_tick(self):
+        """
+        [Learning Tick] Autonomously learns new information.
+        1. Takes one question from the learning_queue.
+        2. Asks AiClient to find and summarize the answer.
+        3. Assesses importance and saves to long-term memory.
+        """
+        self.log("[Learn] Starting learning tick...")
+        
+        if not self.learning_queue:
+            self.log("[Learn] Learning queue is empty.")
+            self._schedule_learning_tick() # Reschedule
+            return
+            
+        # 1. Get a question from the queue
+        question = self.learning_queue.pop(0)
+        self.log(f"[Learn] Processing question: {question}")
+
+        try:
+            # 2. Call AiClient to learn
+            learned_answer = self.ai_client.learn_from_web(question)
+            
+            if not learned_answer:
+                self.log("[Learn] Failed to get a coherent answer.")
+                self._schedule_learning_tick() # Reschedule
+                return
+
+            # 3. Assess importance of the new knowledge
+            # Prepend context for better assessment
+            assessment_text = f"I asked myself '{question}' and learned this: '{learned_answer}'"
+            assessment = self.ai_client.assess_importance(assessment_text)
+            score = assessment.get("importance_score", 5)
+            
+            # 4. Save to long-term memory if important
+            if score >= 7:
+                self.log(f"[Learn] New knowledge (score: {score}) saved to long-term memory.")
+                self.memory.add_long({
+                    "text": learned_answer,
+                    "importance": score,
+                    "reason": assessment.get("reason_for_importance", "Proactive Learning"),
+                    "tags": assessment.get("tags", ["learning", question]),
+                    "source": "proactive_learning",
+                })
+            else:
+                self.log(f"[Learn] Learned fact was not important (score: {score}). Discarding.")
+
+        except Exception as e:
+            self.log(f"[Learn] Error during learning tick: {e}")
+        
+        # 5. Schedule next run
+        self._schedule_learning_tick()
 
     def _schedule_deep_reflection_tick(self):
         """Schedules the 'deep reflection' loop to synthesize core beliefs."""
@@ -2427,6 +2692,11 @@ class AiMentionApp(tk.Tk):
 
     def _loop_tick(self):
         self.log(f"[loop] requests_available={bool(requests)}")
+        
+        # --- ADDED: Emotion check at start of loop ---
+        self._check_and_regulate_emotion()
+        # ---
+        
         if not self.urls or not requests:
             self._schedule_loop()
             return
@@ -2806,8 +3076,11 @@ class AiMentionApp(tk.Tk):
     def _process_ai_reply_task(self, thread: MentionThread, user_msg: ChatMessage):
         """
         [Worker Thread] This runs in the background.
-        It calls the (slow) metacognitive AI function.
         """
+        # --- ADDED: Emotion check before replying ---
+        # This runs in the worker thread, so we must schedule the UI check
+        self.after(0, self._check_and_regulate_emotion)
+        # ---
         try:
             # --- THIS IS THE SLOW PART ---
             # Call the new metacognitive function
@@ -2946,6 +3219,8 @@ class AiMentionApp(tk.Tk):
         emoji = e.to_emoji()
         txt = f"Emotion {emoji}  V={e.valence:.2f}, A={e.arousal:.2f}, C={e.curiosity:.2f}, Anx={e.anxiety:.2f}, T={e.trust_to_user:.2f}"
         self.lbl_emotion.config(text=txt)
+        # We check *after* updating the label
+        self._check_and_regulate_emotion()
 
     def _set_status(self, text: str):
         self.lbl_status.config(text=text)
@@ -2966,6 +3241,89 @@ class AiMentionApp(tk.Tk):
             anxiety=0.1,
             trust_to_user=self.current_emotion.trust_to_user,
         )
+
+    # --- ADDED: New Emotion Regulation Functions ---
+    def _check_and_regulate_emotion(self):
+        """
+        [NEW] Checks if emotion is in an extreme negative state and
+        triggers regulation if necessary.
+        """
+        # Prevent check from running if it's already running
+        if self.is_regulating:
+            return
+
+        # 1. Define negative state
+        is_negative_state = (
+            self.current_emotion.anxiety > 0.8 or 
+            self.current_emotion.valence < -0.7
+        )
+        
+        if not is_negative_state:
+            return # All good
+
+        # 2. Check grace period
+        now = datetime.now(UTC)
+        if self.last_regulation_time:
+            # Only allow regulation once per hour
+            if (now - self.last_regulation_time) < timedelta(hours=1):
+                self.log("[Regulate] In negative state, but within grace period. Waiting.")
+                return 
+
+        # 3. Trigger regulation
+        self.log("[Regulate] Extreme negative state detected. Initiating self-regulation.")
+        self.is_regulating = True # Set lock
+        self.last_regulation_time = now # Set timestamp
+        self._set_status("Re-centering my thoughts...") # Update UI
+
+        # Start regulation in a separate thread to avoid freezing UI
+        # (The regulation itself is an LLM call)
+        threading.Thread(
+            target=self._regulate_emotion_task,
+            args=(self.current_emotion,), # Pass a copy
+            daemon=True
+        ).start()
+
+    def _regulate_emotion_task(self):
+        """
+        [NEW] [Worker Thread] Runs the cognitive re-framing.
+        """
+        try:
+            new_emotion, thought = self.ai_client.regulate_emotion(self.current_emotion)
+            
+            if new_emotion and thought:
+                # Schedule UI/state updates back on the main thread
+                self.after(0, self._finish_regulation_ui, new_emotion, thought)
+            else:
+                # Failed, just release the lock
+                self.after(0, self.is_regulating, False)
+                
+        except Exception as e:
+            self.log(f"[Regulate] Error in regulation task: {e}")
+            self.after(0, setattr, self, 'is_regulating', False) # Release lock on main thread
+
+    def _finish_regulation_ui(self, new_emotion: EmotionState, thought: str):
+        """
+        [NEW] [Main Thread] Applies the results of self-regulation.
+        """
+        self.log(f"[Regulate] Applying new stable state. Thought: {thought}")
+        
+        # 1. Apply new state
+        self.current_emotion = new_emotion
+        
+        # 2. Save the thought
+        self.memory.add_short({
+            "type": "self_regulation",
+            "text": thought,
+            "emotion": asdict(new_emotion),
+            "source": "cognitive_reframing"
+        })
+        
+        # 3. Update UI
+        self._update_emotion_label() # This will call _check... again, but lock will stop it
+        self._set_status("I have re-centered my perspective.")
+        
+        # 4. Release lock
+        self.is_regulating = False
 
 
 if __name__ == "__main__":
