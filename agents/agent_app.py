@@ -2313,7 +2313,8 @@ class AiClient:
         user_msg: ChatMessage, 
         draft_reply: str, 
         current_emotion: EmotionState,
-        context_analysis: dict # <-- NEW ARGUMENT
+        context_analysis: dict, # <-- NEW ARGUMENT
+        empathic_strategy: dict
     ) -> dict:
         """
         [Call 2] Calls the LLM to evaluate the draft reply.
