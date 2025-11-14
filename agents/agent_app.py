@@ -2417,7 +2417,9 @@ class AiClient:
         bad_draft: str,
         critique: str,
         current_emotion: EmotionState,
-        agent_name: str
+        agent_name: str,
+        empathic_strategy:dict
+
     ) -> ChatMessage:
         """
         [Call 3] Generates a new, final reply based on the critique.
