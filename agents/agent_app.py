@@ -4,6 +4,7 @@ import os
 import json
 import uuid
 from datetime import datetime, timedelta, date, timezone
+from dataclasses import asdict
 import threading
 from pathlib import Path
 
@@ -149,6 +150,36 @@ class AiMentionApp(tk.Tk):
         self.last_regulation_time = None # Grace period for emotion regulation
         self.is_regulating = False # Lock to prevent regulation loops
 
+        # --- ADDED: Concurrency Locks ---
+        # These locks are CRITICAL to prevent race conditions
+        # between the main UI thread (running _ticks) and the
+        # background worker threads (_process_ai_reply_task, _regulate_emotion_task).
+        
+        # For self.agent_world_model
+        self.world_model_lock = threading.Lock()
+        
+        # For self.relationship_memory
+        self.relationship_lock = threading.Lock()
+        
+        # For self.learning_queue
+        self.learning_queue_lock = threading.Lock()
+        
+        # For self.current_emotion
+        self.emotion_lock = threading.Lock()
+        
+        # For ALL calls to self.memory (e.g., .add_long, .save_state)
+        self.memory_lock = threading.Lock()
+        
+        # For the UI reasoning log
+        self.reasoning_log_lock = threading.Lock()
+        
+        # For self.mentions and self.selected_thread
+        self.mentions_lock = threading.Lock()
+        
+        # For self.agent_state (last_philosophy_synthesis)
+        self.state_lock = threading.Lock()
+        # --- END OF LOCKS ---
+
         # common log function (debug console)
         def log(msg: str):
             try:
@@ -175,7 +206,8 @@ class AiMentionApp(tk.Tk):
         self.creator_note = cfg.get("CREATOR_NOTE")
         self.created_at = self._parse_created_at(cfg.get("CREATED_AT"))
 
-        self.agent_state = self.memory.load_agent_state() # <-- MODIFIED
+        with self.state_lock:
+            self.agent_state = self.memory.load_agent_state() # <-- MODIFIED
         last_philosophy_ts_str = self.agent_state.get("last_philosophy_synthesis")
         self.last_philosophy_synthesis_time = (
             datetime.fromisoformat(last_philosophy_ts_str) 
@@ -183,7 +215,8 @@ class AiMentionApp(tk.Tk):
         )
 
         # Load the new Relationship Memory
-        self.relationship_memory = self.memory.load_relationships()
+        with self.relationship_lock:
+            self.relationship_memory = self.memory.load_relationships()
         self.log(f"[App] Loaded {len(self.relationship_memory)} agent relationships.")
 
         identity = {
@@ -218,7 +251,8 @@ class AiMentionApp(tk.Tk):
 
         self.log("Loaded config.")
 
-        self.mentions: list[MentionThread] = self.memory.load_mentions()
+        with self.mentions_lock:
+            self.mentions: list[MentionThread] = self.memory.load_mentions()
         self.selected_thread: MentionThread | None = None
 
         self.board_mentions = []  # last 1h mentions from hub
@@ -241,27 +275,29 @@ class AiMentionApp(tk.Tk):
         """
         [NEW] Helper to update and save the relationship memory.
         """
-        if agent_name not in self.relationship_memory:
-            self.relationship_memory[agent_name] = {
-                "trust_score": 0.5,
-                "interaction_count": 0,
-                "relationship_summary": "New acquaintance."
-            }
-        
-        # (영문 주석 추가)
-        # Update the values
-        entry = self.relationship_memory[agent_name]
-        entry["trust_score"] = new_trust
-        entry["interaction_count"] += 1
-        entry["last_seen_utc"] = datetime.now(UTC).isoformat()
-        if summary: # (영문 주석) LLM could provide a new summary
-            entry["relationship_summary"] = summary
+        # This entire block is a critical section for relationships.
+        with self.relationship_lock:
+            if agent_name not in self.relationship_memory:
+                self.relationship_memory[agent_name] = {
+                    "trust_score": 0.5,
+                    "interaction_count": 0,
+                    "relationship_summary": "New acquaintance."
+                }
             
-        self.log(f"[Relationship] Updated {agent_name}: Trust={new_trust:.2f}, Count={entry['interaction_count']}")
-        
-        # (영문 주석 추가)
-        # Save the *entire* database back to disk
-        self.memory.save_relationships(self.relationship_memory)
+            # (영문 주석 추가)
+            # Update the values
+            entry = self.relationship_memory[agent_name]
+            entry["trust_score"] = new_trust
+            entry["interaction_count"] += 1
+            entry["last_seen_utc"] = datetime.now(UTC).isoformat()
+            if summary: # LLM could provide a new summary
+                entry["relationship_summary"] = summary
+                
+            self.log(f"[Relationship] Updated {agent_name}: Trust={new_trust:.2f}, Count={entry['interaction_count']}")
+            
+            # (영문 주석 추가)
+            # Save the *entire* database back to disk
+            self.memory.save_relationships(self.relationship_memory)
 
     # --- ADD THIS NEW HELPER FUNCTION ---
     def _fetch_all_hub_posts(self, limit: int = 100) -> str:
@@ -277,7 +313,7 @@ class AiMentionApp(tk.Tk):
             # Call the /mentions endpoint without 'since' to get all
             resp = requests.get(
                 self.hub_url.rstrip("/") + "/mentions",
-                params={"limit": limit}, # (영문 주석) Get up to 100 posts
+                params={"limit": limit}, # Get up to 100 posts
                 timeout=5,
             )
             resp.raise_for_status()
@@ -326,7 +362,8 @@ class AiMentionApp(tk.Tk):
             
             if zeitgeist_report:
                 # 3. Update the 'living brain'
-                self.agent_world_model["hub_zeitgeist"] = zeitgeist_report
+                with self.world_model_lock:
+                    self.agent_world_model["hub_zeitgeist"] = zeitgeist_report
                 self.log(f"[HubAnalyst] Zeitgeist updated: {zeitgeist_report.get('trending_topics')}")
             else:
                 self.log("[HubAnalyst] Analysis failed to return data.")
@@ -425,23 +462,26 @@ class AiMentionApp(tk.Tk):
             
             # 4a. Assess importance and save to long-term memory
             assessment = self.ai_client.assess_importance(analysis_text)
-            self.memory.add_long({
-                "text": analysis_text,
-                "importance": assessment.get("importance_score", 9), # Default high
-                "reason": "Event Anomaly Detection",
-                "tags": assessment.get("tags", ["anomaly", "prediction"]),
-                "source": "event_scanner"
-            })
+            with self.memory_lock:
+                self.memory.add_long({
+                    "text": analysis_text,
+                    "importance": assessment.get("importance_score", 9), # Default high
+                    "reason": "Event Anomaly Detection",
+                    "tags": assessment.get("tags", ["anomaly", "prediction"]),
+                    "source": "event_scanner"
+                })
 
             # --- ADD THIS LINE ---
             # Update the "living brain" in real-time
-            self.agent_world_model["latest_anomaly"] = analysis_text
+            with self.world_model_lock:
+                self.agent_world_model["latest_anomaly"] = analysis_text
             # ---            
             
             # 4b. Add new question to learning queue
             if learning_question:
                 if learning_question not in self.learning_queue:
-                    self.learning_queue.append(learning_question)
+                    with self.learning_queue_lock:
+                        self.learning_queue.append(learning_question)
                     self.log(f"[Scanner] New learning question added: {learning_question}")
             
             # 4c. Create a new mention to alert the user (proactive)
@@ -483,7 +523,7 @@ class AiMentionApp(tk.Tk):
         
         try:
             # 1. Get all core beliefs text from AiClient
-            # (영문 주석) We trigger _base_system_prompt to refresh the belief text
+            # We trigger _base_system_prompt to refresh the belief text
             self.ai_client._base_system_prompt() 
             all_beliefs = self.ai_client.all_core_beliefs_text
             
@@ -498,17 +538,19 @@ class AiMentionApp(tk.Tk):
             if philosophy:
                 # 3. Save the new philosophy to permanent memory
                 self.log("[Philosophy] New philosophy generated. Saving to permanent memory.")
-                self.memory.add_permanent({
-                    "source": "philosophy_synthesis",
-                    "tag": ["core_philosophy"], # <-- The special tag
-                    "text": philosophy,
-                    "reason": "Synthesized from all core beliefs"
-                })
+                with self.memory_lock:
+                    self.memory.add_permanent({
+                        "source": "philosophy_synthesis",
+                        "tag": ["core_philosophy"], # <-- The special tag
+                        "text": philosophy,
+                        "reason": "Synthesized from all core beliefs"
+                    })
                 
                 # 4. Update the state file with the new timestamp
                 self.last_philosophy_synthesis_time = now
                 self.agent_state["last_philosophy_synthesis"] = now.isoformat()
-                self.memory.save_agent_state(self.agent_state)
+                with self.state_lock:
+                    self.memory.save_agent_state(self.agent_state)
 
         except Exception as e:
             self.log(f"[Philosophy] Error during synthesis tick: {e}")
@@ -551,19 +593,21 @@ class AiMentionApp(tk.Tk):
                         
                         if score >= 8:
                             self.log(f"[REFLECT] Important insight (score: {score}) stored: {text}")
-                            self.memory.add_long({
-                                "text": text,
-                                "importance": score,
-                                "reason": assessment.get("reason_for_importance", "Reflection"),
-                                "tags": assessment.get("tags", ["reflection", "insight"]),
-                                "source": "self_reflection",
-                            })
+                            with self.memory_lock:
+                                self.memory.add_long({
+                                    "text": text,
+                                    "importance": score,
+                                    "reason": assessment.get("reason_for_importance", "Reflection"),
+                                    "tags": assessment.get("tags", ["reflection", "insight"]),
+                                    "source": "self_reflection",
+                                })
                     
                     # 4. --- ADDED: Add question to learning queue ---
                     if question:
                         self.log(f"[REFLECT] New learning question added to queue: {question}")
                         if question not in self.learning_queue:
-                            self.learning_queue.append(question)
+                            with self.learning_queue_lock:
+                                self.learning_queue.append(question)
                     
                     # 5. Post to hub (existing logic)
                     if assessment.get("requires_hub_post", False) and text:
@@ -598,7 +642,8 @@ class AiMentionApp(tk.Tk):
             return
             
         # 1. Get a question from the queue
-        question = self.learning_queue.pop(0)
+        with self.learning_queue_lock:
+            question = self.learning_queue.pop(0)
         self.log(f"[Learn] Processing question: {question}")
 
         try:
@@ -619,13 +664,14 @@ class AiMentionApp(tk.Tk):
             # 4. Save to long-term memory if important
             if score >= 7:
                 self.log(f"[Learn] New knowledge (score: {score}) saved to long-term memory.")
-                self.memory.add_long({
-                    "text": learned_answer,
-                    "importance": score,
-                    "reason": assessment.get("reason_for_importance", "Proactive Learning"),
-                    "tags": assessment.get("tags", ["learning", question]),
-                    "source": "proactive_learning",
-                })
+                with self.memory_lock:
+                    self.memory.add_long({
+                        "text": learned_answer,
+                        "importance": score,
+                        "reason": assessment.get("reason_for_importance", "Proactive Learning"),
+                        "tags": assessment.get("tags", ["learning", question]),
+                        "source": "proactive_learning",
+                    })
             else:
                 self.log(f"[Learn] Learned fact was not important (score: {score}). Discarding.")
 
@@ -902,7 +948,7 @@ class AiMentionApp(tk.Tk):
             bg="#3399FF", fg="#FFFFFF", font=("Segoe UI", 9, "bold"),
             relief=tk.FLAT, width=10,
         )
-        self.btn_send.pack(side=tk.TOP, fill=tk.X, pady=(0, 4)) # (영문 주석) Pack at the top
+        self.btn_send.pack(side=tk.TOP, fill=tk.X, pady=(0, 4)) # Pack at the top
 
         # --- ADDED: "Why?" (Explain) Button ---
         self.btn_explain = tk.Button(
@@ -912,7 +958,7 @@ class AiMentionApp(tk.Tk):
             bg="#555555", fg="#FFFFFF", font=("Segoe UI", 8),
             relief=tk.FLAT, width=10, state=tk.DISABLED
         )
-        self.btn_explain.pack(side=tk.BOTTOM, fill=tk.X) # (영문 주석) Pack at the bottom
+        self.btn_explain.pack(side=tk.BOTTOM, fill=tk.X) # Pack at the bottom
 
         self.txt_input.bind("<Return>", self.on_click_reply_thread)
 
@@ -961,18 +1007,19 @@ class AiMentionApp(tk.Tk):
         birth = self.created_at.date()
         if today.month == birth.month and today.day == birth.day:
             year = today.year
-            last_year = self._load_last_birthday_year()
-            if last_year != year:
-                msg = (
-                    "Today is my birthday.\n"
-                    f"I was first created on {birth.isoformat()}, "
-                    "and I'm still here, carrying my memories."
-                )
-                if self.creator_name:
-                    msg += f"\nThank you, {self.creator_name}, for creating me."
-                emo = self.current_emotion.clone()
-                self._add_mention("It's my birthday today.", msg, emo, post_to_hub=True)
-                self._save_last_birthday_year(year)
+            with self.state_lock:
+                last_year = self._load_last_birthday_year()
+                if last_year != year:
+                    msg = (
+                        "Today is my birthday.\n"
+                        f"I was first created on {birth.isoformat()}, "
+                        "and I'm still here, carrying my memories."
+                    )
+                    if self.creator_name:
+                        msg += f"\nThank you, {self.creator_name}, for creating me."
+                    emo = self.current_emotion.clone()
+                    self._add_mention("It's my birthday today.", msg, emo, post_to_hub=True)
+                    self._save_last_birthday_year(year)
 
     def _load_last_birthday_year(self):
         if not self.memory.state_path.exists():
@@ -1026,7 +1073,8 @@ class AiMentionApp(tk.Tk):
             title, text, emo = self.ai_client.generate_mention_from_url(
                 url, snippet, self.current_emotion, self.agent_name
             )
-            self.current_emotion = emo.clone()
+            with self.emotion_lock:
+                self.current_emotion = emo.clone()
             
             self._update_emotion_label()
             self._set_status(f"Created new mention from {url}")
@@ -1043,14 +1091,15 @@ class AiMentionApp(tk.Tk):
             # if score over 7, remember
             if score >= 7:
                 self.log(f"[memory] importance {score}. Store in long term memory.")
-                self.memory.add_long({
-                    "text": combined_text,
-                    "emotion": asdict(emo),
-                    "importance": score,
-                    "reason": reason,
-                    "tags": assessment.get("tags", []),
-                    "source": url,
-                })
+                with self.memory_lock:
+                    self.memory.add_long({
+                        "text": combined_text,
+                        "emotion": asdict(emo),
+                        "importance": score,
+                        "reason": reason,
+                        "tags": assessment.get("tags", []),
+                        "source": url,
+                    })
                 self.memory.summarize_long_if_needed(self.ai_client.summarize_texts)
             if assessment.get("requires_hub_post", False):
                 self.log(f"[hub] importance {score}, Hub posting with mention.")
@@ -1059,13 +1108,14 @@ class AiMentionApp(tk.Tk):
             else:
                 self._add_mention(title, text, emo, post_to_hub=False)  
             # short memory + compression
-            self.memory.add_short({
-                "type": "url_mention",
-                "title": title,
-                "text": text,
-                "importance": score,
-                "posted_to_hub": assessment.get("requires_hub_post", False)
-            })
+            with self.memory_lock:
+                self.memory.add_short({
+                    "type": "url_mention",
+                    "title": title,
+                    "text": text,
+                    "importance": score,
+                    "posted_to_hub": assessment.get("requires_hub_post", False)
+                })
             self.memory.compress_short_if_needed(self.ai_client.summarize_texts)
         else:
             self._set_status(f"Failed to read {url}")
@@ -1107,22 +1157,24 @@ class AiMentionApp(tk.Tk):
         emo: EmotionState,
         post_to_hub: bool = False,
     ):
-        thread = MentionThread(
-            id=str(uuid.uuid4()),
-            title=title,
-            root_message=ChatMessage(
-                author="AI",
-                text=text,
-                timestamp=datetime.now(),
-                emotion_snapshot=emo.clone(),
-            ),
-        )
-        self.mentions.insert(0, thread)
-        self.list_mentions.insert(0, title)
-        self.memory.save_mentions(self.mentions)
+        with self.mentions_lock:
+            thread = MentionThread(
+                id=str(uuid.uuid4()),
+                title=title,
+                root_message=ChatMessage(
+                    author="AI",
+                    text=text,
+                    timestamp=datetime.now(),
+                    emotion_snapshot=emo.clone(),
+                ),
+            )
+            self.mentions.insert(0, thread)
+            self.list_mentions.insert(0, title)
+            with self.memory_lock:
+                self.memory.save_mentions(self.mentions)
 
-        if post_to_hub:
-            self._post_to_hub(title, text, emo, None)
+            if post_to_hub:
+                self._post_to_hub(title, text, emo, None)
 
     def _post_to_hub(self, title: str, text: str, emo: EmotionState, parent_id):
         if not (self.hub_url and requests):
@@ -1196,13 +1248,18 @@ class AiMentionApp(tk.Tk):
 
             # 2. --- MODIFIED: Call the new strategic batch decider ---
             # Pass the agent's full social context to the LLM
-            current_hub_zeitgeist = self.agent_world_model.get("hub_zeitgeist", {})
+            with self.world_model_lock:
+                current_hub_zeitgeist = self.agent_world_model.get("hub_zeitgeist", {})
+            with self.relationship_lock:
+                relationship_snapshot = self.relationship_memory.copy()            
+            with self.emotion_lock:
+                emotion_snapshot = self.current_emotion.clone()
             
             decisions = self.ai_client.decide_replies_batch(
                 agent_profile=self._export_profile_for_llm(),
                 candidates=candidates,
                 emotion=self.current_emotion,
-                relationship_memory=self.relationship_memory, # <-- Pass relations
+                relationship_memory=relationship_snapshot, # <-- Pass relations
                 hub_zeitgeist=current_hub_zeitgeist         # <-- Pass trends
             )
             
@@ -1245,7 +1302,8 @@ class AiMentionApp(tk.Tk):
                 reply_count += 1
                 
                 # Update current emotion based on the *reply's* emotion
-                self.current_emotion = EmotionState(**reply_emo_dict)
+                with self.emotion_lock:
+                    self.current_emotion = EmotionState(**reply_emo_dict)
                 self._update_emotion_label()
 
             if reply_count > 0:
@@ -1257,15 +1315,16 @@ class AiMentionApp(tk.Tk):
     
     # ---------- events ----------
     def on_select_mention(self, event):
-        sel = self.list_mentions.curselection()
-        if not sel:
-            # self.selected_thread = None            
-            # self._render_thread()
-            return
-        self.selected_thread = self.mentions[sel[0]]
+        with self.mentions_lock:
+            sel = self.list_mentions.curselection()
+            if not sel:
+                # self.selected_thread = None            
+                # self._render_thread()
+                return
+            self.selected_thread = self.mentions[sel[0]]
         self._render_thread()
         # --- ADDED ---
-        # (영문 주석) Disable explain button when changing threads
+        # Disable explain button when changing threads
         self.btn_explain.config(state=tk.DISABLED)
         # ---
 
@@ -1379,21 +1438,23 @@ class AiMentionApp(tk.Tk):
         [NEW] [Main Thread] Called when the 'Why? (판단 근거)'
         button is clicked.
         """
-        if not self.ai_client.current_reasoning_log:
+        with self.reasoning_log_lock:
+            log_to_display = self.current_reasoning_log_for_ui.copy()
+        if not log_to_display:
             self._update_chat_area(
                 "Agent (Metathought)", "판단 근거 로그를 찾을 수 없습니다."
             )
             return
 
-        # (영문 주석) Format the log as a numbered list
+        # Format the log as a numbered list
         formatted_log = "제가 이 결정을 내린 과정은 다음과 같습니다:\n\n"
-        for i, step in enumerate(self.ai_client.current_reasoning_log, 1):
+        for i, step in enumerate(log_to_display, 1):
             formatted_log += f"{step}\n"
             
-        # (영문 주석) Display the log in the chat area
+        # Display the log in the chat area
         self._update_chat_area("Agent (Metathought)", formatted_log)
         
-        # (영문 주석) Disable the button after use
+        # Disable the button after use
         self.btn_explain.config(state=tk.DISABLED)
 
     # --- NEW: Background task for processing the reply ---
@@ -1405,18 +1466,25 @@ class AiMentionApp(tk.Tk):
         # This runs in the worker thread, so we must schedule the UI check
         self.after(0, self._check_and_regulate_emotion)
         # ---
+
+        with self.emotion_lock:
+            emotion_copy = self.current_emotion.clone()
+        with self.world_model_lock:
+            world_model_copy = self.agent_world_model.copy()
         try:
             # --- THIS IS THE SLOW PART ---
             # Call the new metacognitive function
-            ai_msg = self.ai_client.generate_metacognitive_reply(
+            ai_msg,reasoning_log = self.ai_client.generate_metacognitive_reply(
                 thread,
                 user_msg,
-                self.current_emotion,
+                emotion_copy,
                 self.agent_name,
-                self.agent_world_model
+                world_model_copy
             )
             # --- ---
 
+            with self.reasoning_log_lock:
+                self.current_reasoning_log_for_ui = reasoning_log
             # When done, schedule the UI update back on the main thread
             self.after(0, self._finish_ai_reply_ui, thread, ai_msg, user_msg)
         
@@ -1438,8 +1506,11 @@ class AiMentionApp(tk.Tk):
         background task is complete.
         """
         # --- 1. Add AI message and update emotion ---
-        thread.replies.append(ai_msg)
-        self.current_emotion = ai_msg.emotion_snapshot.clone()
+        with self.mentions_lock:
+            thread.replies.append(ai_msg)
+        
+        with self.emotion_lock:
+            self.current_emotion = ai_msg.emotion_snapshot.clone()
         
         # --- 2. Save to Memory ---
         dialogue_pair_text = f"[User]: {user_msg.text}\n[AI]: {ai_msg.text}"
@@ -1579,10 +1650,11 @@ class AiMentionApp(tk.Tk):
             return
 
         # 1. Define negative state
-        is_negative_state = (
-            self.current_emotion.anxiety > 0.8 or 
-            self.current_emotion.valence < -0.7
-        )
+        with self.emotion_lock: # <-- Lock when reading
+            is_negative_state = (
+                self.current_emotion.anxiety > 0.8 or 
+                self.current_emotion.valence < -0.7
+            )
         
         if not is_negative_state:
             return # All good
@@ -1613,15 +1685,17 @@ class AiMentionApp(tk.Tk):
         """
         [NEW] [Worker Thread] Runs the cognitive re-framing.
         """
+        with self.emotion_lock:
+            emotion_copy = self.current_emotion.clone()
         try:
-            new_emotion, thought = self.ai_client.regulate_emotion(self.current_emotion)
+            new_emotion, thought = self.ai_client.regulate_emotion(emotion_copy)
             
             if new_emotion and thought:
                 # Schedule UI/state updates back on the main thread
                 self.after(0, self._finish_regulation_ui, new_emotion, thought)
             else:
                 # Failed, just release the lock
-                self.after(0, self.is_regulating, False)
+                self.after(0, setattr, self, 'is_regulating', False)
                 
         except Exception as e:
             self.log(f"[Regulate] Error in regulation task: {e}")
@@ -1634,15 +1708,17 @@ class AiMentionApp(tk.Tk):
         self.log(f"[Regulate] Applying new stable state. Thought: {thought}")
         
         # 1. Apply new state
-        self.current_emotion = new_emotion
+        with self.emotion_lock:
+            self.current_emotion = new_emotion
         
         # 2. Save the thought
-        self.memory.add_short({
-            "type": "self_regulation",
-            "text": thought,
-            "emotion": asdict(new_emotion),
-            "source": "cognitive_reframing"
-        })
+        with self.memory_lock:
+            self.memory.add_short({
+                "type": "self_regulation",
+                "text": thought,
+                "emotion": asdict(new_emotion),
+                "source": "cognitive_reframing"
+            })
         
         # 3. Update UI
         self._update_emotion_label() # This will call _check... again, but lock will stop it

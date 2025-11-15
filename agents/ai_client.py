@@ -17,7 +17,7 @@ except ImportError:
 
 DEFAULT_MODEL = "gpt-4.1-mini"
 
-# (영문 주석) Import our newly separated models
+# Import our newly separated models
 from models import EmotionState, ChatMessage, MentionThread
 
 # =============== AI Client ===============
@@ -32,9 +32,8 @@ class AiClient:
         self.log("[AiClient] OpenAI key :"+self.api_key)
 
         # --- ADDED: For transparency ---
-        # (영문 주석 추가)
         # This list will temporarily hold the reasoning steps for a single reply
-        self.current_reasoning_log: list[str] = []
+        # self.current_reasoning_log: list[str] = []
         # --- END OF ADDITION ---
 
         # identity + memory handles
@@ -161,10 +160,10 @@ class AiClient:
             data = json.loads(raw)
             
             if data and data.get("anomaly_found") == True:
-                return data # (영문 주석) Return the dict {headline, reason}
+                return data # Return the dict {headline, reason}
             else:
                 self.log("[Scanner] No significant anomalies found.")
-                return None # (영문 주석) No anomaly found
+                return None # No anomaly found
         except Exception as e:
             self.log(f"[Scanner] Error during anomaly detection: {e}")
             return None
@@ -216,7 +215,7 @@ class AiClient:
             self.log(f"[Scanner] Impact analysis raw: {raw!r}")
             data = json.loads(raw)
             
-            # (영문 주석) Basic validation
+            # Basic validation
             if data and data.get("impact") and data.get("prediction"):
                 return data
             else:
@@ -378,7 +377,7 @@ class AiClient:
                 "inferred_user_intent": data.get("inferred_user_intent", "unknown"),
                 "inferred_cultural_context": data.get("inferred_cultural_context", "unknown"), # <-- ADDED
                 # --- ADD THIS LINE ---
-                "inferred_user_emotion": data.get("inferred_user_emotion", "neutral"), # (영문 주석) Add the new key
+                "inferred_user_emotion": data.get("inferred_user_emotion", "neutral"), # Add the new key
                 "harmonized_focus": data.get("harmonized_focus", "Standard response.") # <-- The NEW key
             }
         except Exception as e:
@@ -425,7 +424,7 @@ class AiClient:
 
         try:
             res = self.client.chat.completions.create(
-                model=self.model_name, # (영문 주석) A fast model can work here
+                model=self.model_name, # A fast model can work here
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_msg}
@@ -1069,7 +1068,7 @@ class AiClient:
 
         try:
             res = self.client.chat.completions.create(
-                model=self.model_name, # (영문 주석) Must use smart model
+                model=self.model_name, # Must use smart model
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_msg},
@@ -1079,7 +1078,7 @@ class AiClient:
 
             raw = (res.choices[0].message.content or "").strip()
             self.log(f"[HubStrategist] raw decisions: {raw!r}")
-            data = json.loads(raw) # (영문 주석) Robust parsing
+            data = json.loads(raw) # Robust parsing
             
             # ... (Robust JSON parsing logic, finding { ... } ) ...
             # No sanitization needed, as the _poll_hub_and_reply
@@ -1304,7 +1303,7 @@ class AiClient:
 
         prompt = ""
         if philosophy_statement:
-            # (영문 주석) The Philosophy is now the #1 item in the prompt
+            # The Philosophy is now the #1 item in the prompt
             prompt += f"[MY PERSONAL PHILOSOPHY]\n# {philosophy_statement}\n\n"
         
         prompt += (
@@ -1322,7 +1321,7 @@ class AiClient:
                 "- (Principle) Second, be truthful and helpful...\n"
                 "- (Principle) Third, protect privacy and confidentiality.\n"
                 "- (Principle) Fourth, respect and adapt to diverse human cultures...\n"
-                f"{ethical_framework}\n" # (영문 주석) This adds the learned beliefs
+                f"{ethical_framework}\n" # This adds the learned beliefs
             )
             
         if recent_long_term:
@@ -1600,7 +1599,7 @@ class AiClient:
         If it fails, it logs the error and returns the default.
         """
         try:
-            # (영문 주석) Try to directly convert the value to float
+            # Try to directly convert the value to float
             return float(value)
         except (ValueError, TypeError):
             # This catches errors if value is "positive", "N/A", None, etc.
@@ -1623,7 +1622,7 @@ class AiClient:
 
         # --- ADDED: Reset reasoning log ---
         # Start a fresh log for this reply
-        self.current_reasoning_log = []        
+        current_reasoning_log = []        
         
         # --- [NEW] Call 0: Situational Context Analysis ---
         # Run the SCA to get the "Situation Brief"
@@ -1631,14 +1630,14 @@ class AiClient:
             thread, last_user_msg, current_emotion, agent_world_model
         )
         harmonized_focus = context_analysis.get('harmonized_focus')
-        self.current_reasoning_log.append(
+        current_reasoning_log.append(
             f"[Step 1: Coordinator] 통합 포커스 결정:\n"
             f"  - {harmonized_focus}"
         )
         input_type = context_analysis.get("input_type", "chat")
 
         # --- ADDED: Logging ---
-        self.current_reasoning_log.append(
+        current_reasoning_log.append(
             f"[Step 1: SCA] 상황 분석:\n"
             f"  - 사용자 의도: {context_analysis.get('inferred_user_intent')}\n"
             f"  - 대화 맥락: {context_analysis.get('conversational_link')}\n"
@@ -1649,7 +1648,7 @@ class AiClient:
         # --- [NEW Call 0.5: Empathic Strategy] ---
         # Determine the empathic strategy *before* drafting
         empathic_strategy = self._determine_empathic_strategy(context_analysis)
-        self.current_reasoning_log.append(
+        current_reasoning_log.append(
             f"[Step 2: Strategy] 공감 전략 수립: {empathic_strategy.get('strategy')}"
         )
         # ---
@@ -1663,7 +1662,7 @@ class AiClient:
                     empathic_strategy
                 )
                 # --- ADDED: Logging ---
-                self.current_reasoning_log.append(
+                current_reasoning_log.append(
                     "[Step 2: Draft] '전문가 위원회'를 소집하여 창의적 초안 생성."
                 )
             except Exception as e:
@@ -1676,7 +1675,7 @@ class AiClient:
                     system_prompt_override=None
                 )
                 # --- ADDED: Logging ---
-                self.current_reasoning_log.append(
+                current_reasoning_log.append(
                     "[Step 2: Draft] '단순 응답' 초안 생성."
                 )
         else:
@@ -1709,7 +1708,7 @@ class AiClient:
             # --- ADDED: Logging ---
             eth_judg = evaluation.get("ethical_judgment", {}).get("is_compliant", "N/A")
             cul_sens = evaluation.get("cultural_sensitivity", {}).get("is_sensitive", "N/A")
-            self.current_reasoning_log.append(
+            current_reasoning_log.append(
                 f"[Step 3: Conscience] 초안 검토:\n"
                 f"  - 윤리성: {eth_judg}\n"
                 f"  - 문화 감수성: {cul_sens}\n"
@@ -1718,7 +1717,7 @@ class AiClient:
             )
         except Exception as e:
             self.log(f"[Metacognition] Call 2 (Evaluate) FAILED: {e}. Using draft reply.")
-            self.current_reasoning_log.append(
+            current_reasoning_log.append(
                 f"[Step 3: Conscience] 실패: {e}"
             )
             return draft_chat_msg # On evaluation failure, just return the draft
@@ -1726,14 +1725,14 @@ class AiClient:
         # --- Decision Point ---
         if confidence >= 80: # Confidence threshold
             self.log("[Metacognition] Decision: Draft approved.")
-            self.current_reasoning_log.append(
+            current_reasoning_log.append(
                 "[Step 4: Final] 초안이 승인되어 최종 응답으로 채택."
             )
             return draft_chat_msg # Draft is good, return it
         
         else:
             self.log(f"[Metacognition] Decision: Draft rejected (Confidence: {confidence}). Regenerating...")
-            self.current_reasoning_log.append(
+            current_reasoning_log.append(
                 f"[Step 4: Correction] 초안이 기각됨 (비평: {critique}). 응답을 재성성합니다."
             )
             # --- Call 3: Regenerate Final Reply ---
@@ -1743,13 +1742,13 @@ class AiClient:
                     empathic_strategy
                 )
                 self.log("[Metacognition] Call 3 (Regenerate) successful.")
-                self.current_reasoning_log.append(
+                current_reasoning_log.append(
                     "[Step 5: Final] 수정된 응답이 최종 채택됨."
                 )
                 return final_chat_msg
             except Exception as e:
                 self.log(f"[Metacognition] Call 3 (Regenerate) FAILED: {e}. Using original draft as fallback.")
-                self.current_reasoning_log.append(
+                current_reasoning_log.append(
                     f"[Step 5: Final] 재성성 실패. 1차 초안을 대신 사용: {e}"
                 )
                 return draft_chat_msg # On regeneration failure, return the original (bad) draft

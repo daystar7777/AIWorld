@@ -59,7 +59,7 @@ class MemoryManager:
         Returns a dict, e.g., {"Agent-B": {"trust_score": 0.6, ...}}
         """
         if not self.relationship_path.exists():
-            return {} # (영문 주석) Return empty dict if no file
+            return {} # Return empty dict if no file
         try:
             with open(self.relationship_path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -74,7 +74,7 @@ class MemoryManager:
         """
         try:
             with open(self.relationship_path, "w", encoding="utf-8") as f:
-                # (영문 주석) Save with indent for human readability
+                # Save with indent for human readability
                 json.dump(relationships, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"[Memory] Could not save relationships: {e}")
