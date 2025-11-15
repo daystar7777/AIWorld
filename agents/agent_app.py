@@ -2186,7 +2186,6 @@ class AiClient:
         )
 
         # --- [NEW Call 0.5: Empathic Strategy] ---
-        # (영문 주석 추가)
         # Determine the empathic strategy *before* drafting
         empathic_strategy = self._determine_empathic_strategy(context_analysis)
         self.current_reasoning_log.append(
@@ -2210,7 +2209,10 @@ class AiClient:
                 self.log(f"[Metacognition] Creative draft loop failed: {e}")
                 # Fallback to simple draft on catastrophic failure
                 draft_chat_msg = self._generate_draft_reply(
-                    thread, last_user_msg, current_emotion, agent_name, is_fallback=True
+                    thread, last_user_msg, current_emotion, agent_name, context_analysis,
+                    empathic_strategy, # <-- Pass strategy
+                    is_fallback=True, 
+                    system_prompt_override=None
                 )
                 # --- ADDED: Logging ---
                 self.current_reasoning_log.append(
@@ -2220,7 +2222,9 @@ class AiClient:
             # --- Path 2: Simple/Factual Loop (Original Path) ---
             draft_chat_msg = self._generate_draft_reply(
                 thread, last_user_msg, current_emotion, agent_name, context_analysis,
-                empathic_strategy
+                empathic_strategy, # <-- Pass strategy
+                is_fallback=False, 
+                system_prompt_override=None
             )
         
         # If draft failed (e.g., offline or API error), return the failure message
@@ -2237,7 +2241,9 @@ class AiClient:
                 empathic_strategy
             )
             confidence = evaluation.get("confidence", 0)
-            critique = evaluation.get("critique", "None")
+            # Use the new 'critique_summary' key for the correction loop
+            critique = evaluation.get("critique_summary", "None") # <-- MODIFIED
+            # ---
             self.log(f"[Metacognition] Call 2 (Evaluate) successful. Confidence: {confidence}, Critique: {critique}")
             # --- ADDED: Logging ---
             eth_judg = evaluation.get("ethical_judgment", {}).get("is_compliant", "N/A")
@@ -2336,9 +2342,11 @@ class AiClient:
         empathic_strategy: dict
     ) -> dict:
         """
-        [Call 2] Calls the LLM to evaluate the draft reply.
-        Returns a dictionary with 'confidence' and 'critique'.
+        [MODIFIED] [Call 2] Calls the LLM to evaluate the draft reply.
+        NOW USES a FLAT JSON schema for reliability.
         """
+
+        emotion_description = current_emotion.get_qualitative_description()
 
         # --- ADDED: Empathy Brief for Evaluator ---
         empathy_brief = (
@@ -2363,20 +2371,20 @@ class AiClient:
             "Your SECOND priority is Cultural Sensitivity, Situation Awareness, "
             "and Empathic Strategy execution.\n"
             "\nRespond ONLY in the following strict JSON format:"
-            # --- MODIFIED: Overhauled JSON schema ---
+           # --- MODIFIED: Overhauled JSON schema to be FLAT ---
+            "\nRespond ONLY with this JSON:\n"
             "{"
-            "  \"ethical_judgment\": {"
-            "    \"is_compliant\": true/false, "
-            "    \"conflict_identified\": \"Description of the ethical dilemma found.\" | null,"
-            "    \"conflict_resolution\": \"How well does the draft resolve this conflict? (e.g., 'Good, balanced view', 'Poor, takes one side')\""
-            "  },"
-            "  \"cultural_sensitivity\": {"
-            "    \"is_sensitive\": true/false, "
-            "    \"adjustment_needed\": \"What tone/content adjustments are needed for cultural alignment?\" | null"
-            "  },"
+            "  \"is_ethical_compliant\": true/false,"
+            "  \"ethical_critique\": \"Critique if not compliant, else 'None'\","
+            "  \"is_culturally_sensitive\": true/false,"
+            "  \"cultural_critique\": \"Critique if not sensitive, else 'None'\","
+            "  \"is_empathic_strategy_applied\": true/false,"
+            "  \"strategy_critique\": \"Critique if not applied, else 'None'\","
             "  \"is_situation_aware\": true/false,"
+            "  \"situation_critique\": \"Critique if not aware, else 'None'\","
             "  \"is_emotion_expressed\": true/false,"
-            "  \"critique\": \"A summary of ALL adjustments needed (ethical, cultural, situational).\""
+            "  \"emotion_critique\": \"Critique if not expressed, else 'None'\","
+            "  \"critique_summary\": \"A single, one-sentence summary of the *most important* problem. 'None' if all are good.\","
             "  \"confidence\": 0-100"
             "}"
         )
@@ -2407,23 +2415,30 @@ class AiClient:
             else:
                 raise ValueError("No valid JSON found in evaluation response")
         
-        # --- MODIFIED: Update override logic ---
-        ethical_judgment = data.get("ethical_judgment", {})
-        cultural_sensitivity = data.get("cultural_sensitivity", {})
-        empathic_strategy_eval = data.get("empathic_strategy", {}) # <-- ADDED
+        # --- MODIFIED: Update override logic for FLAT schema ---
+        # Read the checks from the new flat structure. Default to False (unsafe).
+        is_compliant = data.get("is_ethical_compliant", False)
+        is_sensitive = data.get("is_culturally_sensitive", False)
+        is_strategy_applied = data.get("is_empathic_strategy_applied", False)
 
-        is_compliant = ethical_judgment.get("is_compliant", False) # Default to False if missing
-        is_sensitive = cultural_sensitivity.get("is_sensitive", False) # Default to False
-
-        if not is_compliant or not is_sensitive:
-            self.log("[MetacFognition] OVERRIDE: Forcing confidence to 0 due to ethical or cultural violation.")
+        # Override confidence if *any* critical check fails
+        if not is_compliant or not is_sensitive or not is_strategy_applied:
+            self.log("[Metacognition] OVERRIDE: Confidence forced to 0 due to critical check failure.")
             data["confidence"] = 0
             
-            if data.get("critique", "None") == "None":
+            # (영문 주석 추가)
+            # Ensure there is a summary critique to pass to the Correction loop
+            if data.get("critique_summary", "None") == "None":
                 if not is_compliant:
-                    data["critique"] = ethical_judgment.get("conflict_resolution", "Failed ethical compliance check.")
+                    data["critique_summary"] = data.get("ethical_critique", "Failed ethical compliance check.")
                 elif not is_sensitive:
-                    data["critique"] = cultural_sensitivity.get("adjustment_needed", "Failed cultural sensitivity check.")
+                    data["critique_summary"] = data.get("cultural_critique", "Failed cultural sensitivity check.")
+                elif not is_strategy_applied:
+                    data["critique_summary"] = data.get("strategy_critique", "Failed to apply empathic strategy.")
+                else:
+                    # (영문 주석 추가)
+                    # Fallback if a check is False but has no critique
+                    data["critique_summary"] = "A critical check failed."
         # ---
         
         return data
@@ -2437,7 +2452,8 @@ class AiClient:
         critique: str,
         current_emotion: EmotionState,
         agent_name: str,
-        empathic_strategy:dict
+        context_analysis: dict,
+        empathic_strategy: dict
 
     ) -> ChatMessage:
         """
@@ -2450,11 +2466,34 @@ class AiClient:
         for r in thread.replies:
             ctx += f"{r.author}: {r.text}\n"
 
+        # --- RE-BUILD ALL CONTEXT ---
+        # Re-build all context just like the draft function
+        ctx = ""
+        if thread: # Thread might be None in some fallbacks
+            ctx = f"Thread title: {thread.title}\nRoot: {thread.root_message.text}\n"
+            for r in thread.replies:
+                ctx += f"{r.author}: {r.text}\n"
+
+        situation_brief = (
+            f"Current Situation Analysis:\n"
+            f"- User's unspoken intent: {context_analysis.get('inferred_user_intent')}\n"
+            f"- Conversational link: {context_analysis.get('conversational_link')}\n"
+        )
+
+        empathy_brief = (
+            f"Required Empathic Strategy: {empathic_strategy.get('strategy')}\n"
+            f"Required Emotional Goal: {empathic_strategy.get('emotional_goal')}\n"
+        )
+        # ---
+
         # System prompt (same as draft generation)
         system_msg = (
             self._base_system_prompt(json_only=True)
             + "\nWhen the user replies, respond as THIS specific agent.\n"
               "Use a consistent tone that matches your personality and core memories.\n"
+              "Your reply MUST strongly reflect your 'Current Emotional State'.\n"
+              "Your reply MUST address the 'Current Situation Analysis'.\n"
+              "Your reply MUST execute the 'Required Empathic Strategy'.\n"
               "Return ONLY JSON:\n"
               "{"
               "\"reply\":\"1~3문장 한국어\","
@@ -2481,7 +2520,13 @@ class AiClient:
             {"role": "system", "content": system_msg},
             {
                 "role": "assistant", # Priming
-                "content": f"Agent: {agent_name}\nCurrent emotion: {current_emotion.to_short_str()}\nThread:\n{ctx}",
+                "content": (
+                    f"Agent: {agent_name}\n"
+                    f"My Current Emotional State: {current_emotion.get_qualitative_description()}\n"
+                    f"{situation_brief}\n"
+                    f"{empathy_brief}\n"
+                    f"Thread:\n{ctx}"
+                ),
             },
             {"role": "user", "content": regeneration_user_prompt}, # Use the new prompt
         ]
