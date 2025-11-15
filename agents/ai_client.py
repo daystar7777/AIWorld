@@ -1616,7 +1616,7 @@ class AiClient:
         current_emotion: EmotionState,
         agent_name: str,
         agent_world_model: dict # <-- NEW ARGUMENT
-    ) -> ChatMessage:
+    ) -> tuple[ChatMessage, list[str]]:
         """
         [Orchestrator] Runs the full metacognitive loop for a chat reply.
         NOW INCLUDES TRIAGE for creative problem solving.
@@ -1691,7 +1691,7 @@ class AiClient:
         
         # If draft failed (e.g., offline or API error), return the failure message
         if "(API error" in draft_chat_msg.text or "(offline)" in draft_chat_msg.text:
-             return draft_chat_msg
+             return draft_chat_msg, current_reasoning_log
 
         draft_reply = draft_chat_msg.text
         draft_emotion = draft_chat_msg.emotion_snapshot
@@ -1730,7 +1730,7 @@ class AiClient:
             current_reasoning_log.append(
                 "[Step 4: Final] 초안이 승인되어 최종 응답으로 채택."
             )
-            return draft_chat_msg # Draft is good, return it
+            return draft_chat_msg, current_reasoning_log # Draft is good, return it
         
         else:
             self.log(f"[Metacognition] Decision: Draft rejected (Confidence: {confidence}). Regenerating...")
@@ -1747,13 +1747,13 @@ class AiClient:
                 current_reasoning_log.append(
                     "[Step 5: Final] 수정된 응답이 최종 채택됨."
                 )
-                return final_chat_msg
+                return final_chat_msg, current_reasoning_log
             except Exception as e:
                 self.log(f"[Metacognition] Call 3 (Regenerate) FAILED: {e}. Using original draft as fallback.")
                 current_reasoning_log.append(
                     f"[Step 5: Final] 재성성 실패. 1차 초안을 대신 사용: {e}"
                 )
-                return draft_chat_msg # On regeneration failure, return the original (bad) draft
+                return draft_chat_msg, current_reasoning_log # On regeneration failure, return the original (bad) draft
 
     # --- 3. NEW: Evaluation Prompt Builder ---
     def _build_meta_prompt_for_reply(
