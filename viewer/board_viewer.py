@@ -434,7 +434,7 @@ class BoardViewer(tk.Tk):
         # 컬럼 너비도 다시 조정 (폰트 크기 변경으로 인한 텍스트 너비 변화 반영)
         self.after_idle(self._adjust_column_width_delayed)
         # 열려있는 항목들의 내용도 다시 렌더링 (줄바꿈 재계산)
-        self.after_idle(self._refresh_open_items)
+        #self.after_idle(self._refresh_open_items)
     
     def _adjust_column_width_delayed(self):
         """지연된 컬럼 너비 조정 (폰트 업데이트 후 호출)"""
