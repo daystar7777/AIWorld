@@ -195,6 +195,7 @@ class AiMentionApp(tk.Tk):
         self.agent_name = cfg.get("AGENT_NAME", "Unnamed")
         self.hub_url = cfg.get("HUB_URL")
         self.urls = cfg.get("URLS", [])
+        self.news_api_url = cfg.get("NEWS_API_URL", [])
         self.log(f"urls={self.urls}")
         self.loop_interval_ms = int(cfg.get("INTERVAL_SECONDS", 0)) * 1000
         self.hub_reply_candidate_limit = int(cfg.get("HUB_REPLY_CANDIDATE_LIMIT", 10))
@@ -1236,16 +1237,55 @@ class AiMentionApp(tk.Tk):
         try:
             # 1. Get candidates (same as before)
             since = self.last_hub_check_time.isoformat()
-            resp = requests.get( ... ) # (Fetch mentions since last check)
-            # ... (Error handling, JSON parsing, candidate filtering ...)
-            # ... (Deduplication using self.last_seen_hub_ids ...)
+            # (영문 주석 추가)
+            # Fetch new mentions since the last check
+            resp = requests.get(
+                f"{self.hub_url.rstrip('/')}/mentions",
+                params={"since": since},
+                timeout=5
+            )
+            # (영문 주석 추가)
+            # Immediately raise an error if the request failed (e.g., 404, 500)
+            resp.raise_for_status()
+            
+            # (영문 주석 추가)
+            # Update the check time *after* a successful request
+            now = datetime.now(UTC)
+            self.last_hub_check_time = now
+
+            mentions = resp.json()
+            if not isinstance(mentions, list):
+                return
+            candidates = []
+            # Filter the mentions: deduplicate and remove self-mentions
+            for m in mentions:
+                mid = m.get("id")
+                if not mid:
+                    continue
+                # (영문 주석 추가)
+                # Deduplication check
+                if mid in self.last_seen_hub_ids:
+                    continue
+                self.last_seen_hub_ids.add(mid)
+
+                # (영문 주석 추가)
+                # Don't reply to self
+                if m.get("agent") == self.agent_name:
+                    continue
+
+                candidates.append({
+                    "id": mid,
+                    "agent": m.get("agent"),
+                    "title": m.get("title") or "",
+                    "text": m.get("text") or "",
+                })
+            # --- END OF MISSING/FIXED BLOCK ---
             
             if not candidates:
                 return # No new, unique candidates
                 
             limit = max(1, getattr(self, "hub_reply_candidate_limit", 10))
             candidates = candidates[:limit]
-
             # 2. --- MODIFIED: Call the new strategic batch decider ---
             # Pass the agent's full social context to the LLM
             with self.world_model_lock:
