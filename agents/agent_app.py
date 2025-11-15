@@ -1336,9 +1336,11 @@ class AiMentionApp(tk.Tk):
                 reply_emo_dict = d.get("emotion")
                 reply_title = d.get("title") or f"RE: {c['title'][:20]}"
                 reply_text = d.get("text") or ""
-                new_emotion_obj: EmotionState
                 # This will be the new EmotionState *object*
                 new_emotion_obj: EmotionState 
+                # Get the current emotion as a fallback default
+                with self.emotion_lock:
+                    default_emotion = self.current_emotion.clone()
 
                 if reply_emo_dict and isinstance(reply_emo_dict, dict):
                     # Case 1: LLM provided a new emotion.
@@ -1346,28 +1348,27 @@ class AiMentionApp(tk.Tk):
                     # using the safe converter.
                     new_emotion_obj = EmotionState(
                         valence=self.ai_client._safe_float_convert(
-                            reply_emo_dict.get("valence"), self.current_emotion.valence
+                            reply_emo_dict.get("valence"), default_emotion.valence
                         ),
                         arousal=self.ai_client._safe_float_convert(
-                            reply_emo_dict.get("arousal"), self.current_emotion.arousal
+                            reply_emo_dict.get("arousal"), default_emotion.arousal
                         ),
                         curiosity=self.ai_client._safe_float_convert(
-                            reply_emo_dict.get("curiosity"), self.current_emotion.curiosity
+                            reply_emo_dict.get("curiosity"), default_emotion.curiosity
                         ),
                         anxiety=self.ai_client._safe_float_convert(
-                            reply_emo_dict.get("anxiety"), self.current_emotion.anxiety
+                            reply_emo_dict.get("anxiety"), default_emotion.anxiety
                         ),
                         trust_to_user=self.ai_client._safe_float_convert(
-                            reply_emo_dict.get("trust_to_user"), self.current_emotion.trust_to_user
+                            reply_emo_dict.get("trust_to_user"), default_emotion.trust_to_user
                         ),
                     )
                 else:
                     # Case 2: LLM did not provide an emotion.
                     # Clone the current EmotionState *object*.
-                    with self.emotion_lock:
-                        new_emotion_obj = self.current_emotion.clone()
+                    new_emotion_obj = default_emotion
                 # Extract other reply details
-                reply_title = d.get("title") or f"RE: {c['title'][:20]}"
+                reply_title = d.get("title") or f"RE: {c['title'][:40]}"
                 reply_text = d.get("text") or ""
                 
                 if not reply_text: continue # Skip empty replies
@@ -1378,7 +1379,7 @@ class AiMentionApp(tk.Tk):
                 
                 # Update current emotion based on the *reply's* emotion
                 with self.emotion_lock:
-                    self.current_emotion = EmotionState(**reply_emo_dict)
+                    self.current_emotion = new_emotion_obj
                 self._update_emotion_label()
 
             if reply_count > 0:
