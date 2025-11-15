@@ -1,7 +1,7 @@
 # agents/example_agent/models.py
 
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, date, timezone
 
 UTC = timezone.utc
 
