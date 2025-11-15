@@ -1332,13 +1332,48 @@ class AiMentionApp(tk.Tk):
                     continue
                 
                 # It's a reply, so extract fields and post
-                reply_emo_dict = d.get("emotion") or asdict(self.current_emotion)
+                # Get the emotion *dictionary* from the LLM
+                reply_emo_dict = d.get("emotion")
+                reply_title = d.get("title") or f"RE: {c['title'][:20]}"
+                reply_text = d.get("text") or ""
+                new_emotion_obj: EmotionState
+                # This will be the new EmotionState *object*
+                new_emotion_obj: EmotionState 
+
+                if reply_emo_dict and isinstance(reply_emo_dict, dict):
+                    # Case 1: LLM provided a new emotion.
+                    # Create a new EmotionState *object* from the dict,
+                    # using the safe converter.
+                    new_emotion_obj = EmotionState(
+                        valence=self.ai_client._safe_float_convert(
+                            reply_emo_dict.get("valence"), self.current_emotion.valence
+                        ),
+                        arousal=self.ai_client._safe_float_convert(
+                            reply_emo_dict.get("arousal"), self.current_emotion.arousal
+                        ),
+                        curiosity=self.ai_client._safe_float_convert(
+                            reply_emo_dict.get("curiosity"), self.current_emotion.curiosity
+                        ),
+                        anxiety=self.ai_client._safe_float_convert(
+                            reply_emo_dict.get("anxiety"), self.current_emotion.anxiety
+                        ),
+                        trust_to_user=self.ai_client._safe_float_convert(
+                            reply_emo_dict.get("trust_to_user"), self.current_emotion.trust_to_user
+                        ),
+                    )
+                else:
+                    # Case 2: LLM did not provide an emotion.
+                    # Clone the current EmotionState *object*.
+                    with self.emotion_lock:
+                        new_emotion_obj = self.current_emotion.clone()
+                # Extract other reply details
                 reply_title = d.get("title") or f"RE: {c['title'][:20]}"
                 reply_text = d.get("text") or ""
                 
                 if not reply_text: continue # Skip empty replies
 
-                self._post_to_hub(reply_title, reply_text, reply_emo_dict, parent_id=cid)
+                # NOW we pass the guaranteed EmotionState *object* to _post_to_hub
+                self._post_to_hub(reply_title, reply_text, new_emotion_obj, parent_id=cid)
                 reply_count += 1
                 
                 # Update current emotion based on the *reply's* emotion
