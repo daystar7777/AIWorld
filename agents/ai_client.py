@@ -1528,6 +1528,13 @@ class AiClient:
               # --- MODIFIED INSTRUCTION ---              
               "Your reply MUST execute the 'Required Empathic Strategy' "
               "to achieve the 'Required Emotional Goal'.\n" # <-- NEW
+              "\n[CRITICAL: Emotion JSON Requirement]\n"
+              "After writing the 'reply', you MUST calculate the agent's new "
+              "emotional state in the 'emotion' object.\n"
+              "ALL 5 keys (valence, arousal, curiosity, anxiety, trust_to_user) "
+              "MUST be present.\n"
+              "All values MUST be a numerical float (e.g., 0.5), "
+              "NOT a string (e.g., 'positive') and NEVER 'null' or 'None'.\n"
             # ---
               "Return ONLY JSON:\n"
               "{"
