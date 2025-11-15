@@ -6,6 +6,8 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+UTC = timezone.utc
+
 # Import models used for saving/loading mentions
 from models import EmotionState, ChatMessage, MentionThread
 

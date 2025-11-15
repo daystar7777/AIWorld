@@ -1,7 +1,9 @@
 # agents/example_agent/models.py
 
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
+
+UTC = timezone.utc
 
 # These are the core data structures (models) used by both
 # the AiClient and the main AiMentionApp (UI).
